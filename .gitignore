@@ -1,0 +1,29 @@
+# --- the archive itself never leaves this machine ------------------------
+# The app is pluggable: it asks for a database on first run, so none of this
+# needs to be in the repository. See "First run" in README.md.
+Archives/*.sqlite
+Archives/*.sqlite-*
+Archives/*.sqlite.bak-*
+Archives/*.dht
+Archives/*.dht-*
+Archives/images/
+Archives/_tmp/
+
+# Chat exports (Facebook / Instagram), and anything unpacked beside them
+your_facebook_activity/
+your_instagram_activity/
+*_activity/
+
+# Identity mapping - real names, and only a mirror of the `people` table
+app/people.yaml
+
+# Which database this machine is connected to
+app/settings.local.json
+
+# --- build output --------------------------------------------------------
+app/web/node_modules/
+app/web/.svelte-kit/
+app/web/build/
+
+__pycache__/
+*.py[cod]
