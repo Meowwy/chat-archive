@@ -17,7 +17,7 @@ timeline, whoever you were talking to and wherever you were talking to them.
   give them a name; that name is what the whole app shows.
 - **Words over time.** Pick a person and see every message they exchanged as a line, month by
   month. Type a word and the line becomes the months they used it — in every form, the same
-  search, counted instead of listed.
+  search, counted instead of listed. Pick up to ten people to compare them on one chart.
 - **Nothing leaves the machine.** No cloud, no CDN, no telemetry. The archive is a file you own,
   and it is never part of this repository.
 

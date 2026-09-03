@@ -6,15 +6,17 @@
 	 *
 	 * It runs the same query language and the same Czech widening; what comes
 	 * back is a shape rather than a list of hits, so the panel reports what was
-	 * counted and leaves the plotting to the chart. It is always on show - the
-	 * chart is what it filters, so there is nothing to close it back to.
+	 * counted - as a total, and broken down the same way the chart is - and
+	 * leaves the plotting to the chart. It is always on show: the chart is what
+	 * it filters, so there is nothing to close it back to.
 	 */
 	let {
-		result = null,
+		total = null,
+		rows = [],
+		terms = [],
 		loading = false,
 		error = null,
 		disabled = false,
-		names = { mine: 'me', theirs: 'them' },
 		onquery
 	} = $props();
 
@@ -39,7 +41,7 @@
 	// Which words the server widened to a whole Czech paradigm, named by their
 	// lemma - "hospody" was counted as every form of "hospoda".
 	let widened = $derived(
-		(result?.terms ?? [])
+		terms
 			.filter((term) => term.forms > 1)
 			.map((term) => term.lemmas.join('/'))
 			.join(', ')
@@ -52,13 +54,7 @@
 	</div>
 
 	<form onsubmit={submit}>
-		<input
-			type="search"
-			placeholder="Count a word…"
-			bind:value={query}
-			oninput={typed}
-			{disabled}
-		/>
+		<input type="search" placeholder="Count a word…" bind:value={query} oninput={typed} {disabled} />
 	</form>
 
 	<div class="results">
@@ -66,19 +62,24 @@
 			<p class="note error">{error}</p>
 		{:else if loading}
 			<p class="note">Counting…</p>
-		{:else if result}
+		{:else if total !== null}
 			<p class="total">
-				{formatCount(result.total)}
-				<span>{result.total === 1 ? 'message' : 'messages'}</span>
+				{formatCount(total)}
+				<span>{total === 1 ? 'message' : 'messages'}</span>
 			</p>
-			<p class="split">
-				<i class="me">{formatCount(result.mine)}</i> {names.mine} ·
-				<i class="them">{formatCount(result.theirs)}</i> {names.theirs}
-			</p>
+			<ul class="rows">
+				{#each rows as row (row.label)}
+					<li>
+						<i class="swatch" style:--c="var({row.color})"></i>
+						<span class="label">{row.label}</span>
+						<span class="value">{formatCount(row.value)}</span>
+					</li>
+				{/each}
+			</ul>
 			{#if widened}
 				<p class="note">Counted in every form of <b>{widened}</b>.</p>
 			{/if}
-			{#if result.total === 0}
+			{#if total === 0}
 				<p class="note">Never said in this conversation.</p>
 			{/if}
 		{:else}
@@ -141,23 +142,39 @@
 		color: var(--muted);
 	}
 
-	.split {
-		margin: 2px 0 12px;
+	.rows {
+		list-style: none;
+		margin: 6px 0 12px;
+		padding: 0;
 		font-size: 12px;
+	}
+
+	.rows li {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		padding: 2px 0;
 		color: var(--muted);
+	}
+
+	.swatch {
+		width: 9px;
+		height: 9px;
+		border-radius: 2px;
+		background: var(--c);
+		flex: none;
+	}
+
+	.label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.value {
+		margin-left: auto;
 		font-variant-numeric: tabular-nums;
-	}
-
-	.split i {
-		font-style: normal;
-	}
-
-	.split i.me {
-		color: var(--me);
-	}
-
-	.split i.them {
-		color: var(--them);
+		color: var(--text);
 	}
 
 	.note {

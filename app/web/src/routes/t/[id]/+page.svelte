@@ -83,6 +83,23 @@
 	// are toggled instead of staying pinned to some absolute ceiling.
 	let peak = $derived(months.reduce((most, m) => Math.max(most, m.messages), 0));
 
+	// Every bar is a share of the space left over by the counts beside it, so
+	// that space has to be one width for the whole list: left to size itself
+	// per row, a month whose figures run to more digits gets a shorter track,
+	// and its bar reads as fewer messages than a quieter month's. The widest
+	// label is measured off-screen and the column pinned to it.
+	const labelWidth = (m) =>
+		formatCount(m.messages).length + formatCount(m.mine).length + formatCount(m.theirs).length;
+
+	let countWidth = $state(0);
+	let widest = $derived(
+		months.reduce((most, m) => (labelWidth(m) > labelWidth(most) ? m : most), {
+			messages: 0,
+			mine: 0,
+			theirs: 0
+		})
+	);
+
 	let years = $derived.by(() => {
 		const map = new Map();
 		for (const month of months) {
@@ -248,7 +265,12 @@
 				</span>
 			</div>
 
-			<div class="timeline">
+			<div class="timeline" style:--cw={countWidth ? `${countWidth + 1}px` : null}>
+				<span class="split probe" aria-hidden="true" bind:clientWidth={countWidth}>
+					{formatCount(widest.messages)}
+					<b>(<i>{formatCount(widest.mine)}</i> /
+						<i>{formatCount(widest.theirs)}</i>)</b>
+				</span>
 				{#each years as group (group.year)}
 					<details open={years.length <= 2}>
 						<summary>
@@ -265,13 +287,11 @@
 						{#each group.months as month (month.month)}
 							<button class="month" onclick={() => jumpToMonth(month)}>
 								<span class="mlabel">{formatMonthShort(month.month)}</span>
-								<span class="bar" style:--w="{peak ? (month.messages / peak) * 100 : 0}%">
-									<span
-										class="me"
-										style:--p="{month.messages ? (month.mine / month.messages) * 100 : 0}%"
-									></span>
-									<span class="them"></span>
-								</span>
+								<span
+									class="bar"
+									style:--w="{peak ? (month.messages / peak) * 100 : 0}%"
+									style:--p="{month.messages ? (month.mine / month.messages) * 100 : 0}%"
+								></span>
 								<span class="split">
 									{formatCount(month.messages)}
 									<b>(<i class="me">{formatCount(month.mine)}</i> /
@@ -586,7 +606,7 @@
 
 	.month {
 		display: grid;
-		grid-template-columns: 34px 1fr auto;
+		grid-template-columns: 34px 1fr var(--cw, auto);
 		align-items: center;
 		gap: 7px;
 		width: 100%;
@@ -607,25 +627,25 @@
 		text-align: left;
 	}
 
+	/* Off-screen twin of the longest counts label; its width sets --cw. */
+	.probe {
+		position: absolute;
+		left: -9999px;
+		top: 0;
+		visibility: hidden;
+	}
+
+	/* One strip painted in two colours, not two boxes laid side by side: boxes
+	   that meet on a fractional pixel - which most of these splits do, the share
+	   being an arbitrary percentage - are rasterised independently and the join
+	   can show as a step. A gradient with a hard stop is one paint, so the two
+	   parts cannot come apart at any zoom or display scale. */
 	.bar {
-		display: flex;
 		height: 7px;
 		border-radius: 3px;
-		overflow: hidden;
 		width: var(--w);
 		min-width: 3px;
-		background: var(--panel-2);
-	}
-
-	.bar .me {
-		width: var(--p);
-		background: var(--me);
-		flex: none;
-	}
-
-	.bar .them {
-		flex: 1;
-		background: var(--them);
+		background: linear-gradient(to right, var(--me) 0 var(--p), var(--them) var(--p) 100%);
 	}
 
 	.note {

@@ -228,6 +228,14 @@ rather than a straight segment drawn across it. The y-axis rescales to whatever 
 24 messages fill the height as readily as 4,692, and **Split by author** breaks the line into the
 same blue and pink halves the conversation timeline uses.
 
+Picking more people adds a line each, up to ten — as many as the palette can keep apart. There
+the me-and-them split gives way to a single question asked of everyone at once: **All**,
+**Outgoing** or **Incoming**, chosen in the left panel. Each line is named in the legend and
+carries a colour taken from a fixed order, held for as long as that person is on the chart, so
+dropping one of five never repaints the other four. The ten colours are stepped separately for
+the light and the dark surface and were checked — not eyeballed — for lightness, chroma and
+colour-blind separation against each neighbouring pair.
+
 ### Reactions are not messages
 
 Instagram writes a reaction into the thread twice: once on the message it belongs to, and once as

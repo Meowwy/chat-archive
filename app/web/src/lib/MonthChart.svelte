@@ -25,19 +25,15 @@
 	);
 
 	/**
-	 * Messages per month, as a line over the whole timeline.
+	 * Messages per month, as one line per series over a shared timeline.
 	 *
-	 * `months` is whatever is being counted - every message, or only the ones
-	 * that used a word - with its gaps filled, so a silent month is a zero
-	 * rather than a straight line across it. Whichever it is, it is the only
-	 * thing plotted and it owns the y-axis, so the shape fills the height.
+	 * `labels` is every month in the range with its gaps filled, so a silent
+	 * month is a zero rather than a straight line drawn across it, and every
+	 * line carries one value per label. Whatever is on show owns the y-axis, so
+	 * the shape always fills the height. Each line names the CSS variable it is
+	 * drawn in - reading the theme is this component's job, not its caller's.
 	 */
-	let {
-		months = [],
-		split = false,
-		names = { mine: 'me', theirs: 'them' },
-		label = 'messages'
-	} = $props();
+	let { labels = [], lines = [] } = $props();
 
 	let canvas;
 	let chart = null;
@@ -61,52 +57,23 @@
 	function build() {
 		const muted = cssVar('--muted');
 		const line = cssVar('--line');
-		const accent = cssVar('--accent');
-		const me = cssVar('--me');
-		const them = cssVar('--them');
 
-		const labels = months.map((m) => m.month);
-		const stroke = {
-			borderWidth: 2,
-			tension: 0.25,
-			pointRadius: 0,
-			pointHoverRadius: 4,
-			pointHitRadius: 12
-		};
-
-		const datasets = [];
-		if (split) {
-			datasets.push(
-				{
-					label: names.mine,
-					data: months.map((m) => m.mine),
-					borderColor: me,
-					backgroundColor: fade(me, 0.12),
-					fill: 'origin',
-					order: 1,
-					...stroke
-				},
-				{
-					label: names.theirs,
-					data: months.map((m) => m.theirs),
-					borderColor: them,
-					backgroundColor: fade(them, 0.12),
-					fill: 'origin',
-					order: 2,
-					...stroke
-				}
-			);
-		} else {
-			datasets.push({
-				label,
-				data: months.map((m) => m.messages),
-				borderColor: accent,
-				backgroundColor: fade(accent, 0.14),
-				fill: 'origin',
-				order: 1,
-				...stroke
-			});
-		}
+		const datasets = lines.map((series, index) => {
+			const colour = cssVar(series.color);
+			return {
+				label: series.label,
+				data: series.values,
+				borderColor: colour,
+				backgroundColor: fade(colour, 0.12),
+				fill: series.fill ? 'origin' : false,
+				order: index + 1,
+				borderWidth: 2,
+				tension: 0.25,
+				pointRadius: 0,
+				pointHoverRadius: 4,
+				pointHitRadius: 12
+			};
+		});
 
 		chart = new Chart(canvas, {
 			type: 'line',
@@ -137,7 +104,8 @@
 				},
 				plugins: {
 					legend: {
-						display: split,
+						// One line needs no legend - the heading above already names it.
+						display: lines.length > 1,
 						align: 'end',
 						labels: { color: muted, boxWidth: 10, boxHeight: 10, padding: 14 }
 					},
@@ -154,9 +122,9 @@
 
 	$effect(() => {
 		// Touch every input so a change in any of them redraws.
-		void [months, split, names, label];
+		void [labels, lines];
 		chart?.destroy();
-		if (months.length) build();
+		if (labels.length && lines.length) build();
 		return () => {
 			chart?.destroy();
 			chart = null;

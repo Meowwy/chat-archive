@@ -65,6 +65,21 @@
 		/* Timeline authorship: me on the left in blue, them on the right in pink. */
 		--me: #3d9bff;
 		--them: #ff5fa2;
+		/* Ten series colours for the Stats chart, in fixed order: a person keeps
+		   the slot they were given for as long as they are on the chart, so
+		   removing someone never repaints the rest. Both sets are stepped for
+		   their own surface and checked for colour-blind separation - the dark
+		   ones are not the light ones dimmed. */
+		--s1: #3987e5;
+		--s2: #d95926;
+		--s3: #199e70;
+		--s4: #c98500;
+		--s5: #d55181;
+		--s6: #008300;
+		--s7: #9085e9;
+		--s8: #e66767;
+		--s9: #29a3bd;
+		--s10: #b7803f;
 		--radius: 10px;
 		color-scheme: dark;
 	}
@@ -81,6 +96,16 @@
 			--mine: #d3e3ff;
 			--me: #1f6feb;
 			--them: #e0357f;
+			--s1: #2a78d6;
+			--s2: #eb6834;
+			--s3: #1baf7a;
+			--s4: #eda100;
+			--s5: #e87ba4;
+			--s6: #008300;
+			--s7: #4a3aa7;
+			--s8: #e34948;
+			--s9: #0e8fa0;
+			--s10: #8f4f14;
 			color-scheme: light;
 		}
 	}
