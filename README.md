@@ -10,8 +10,9 @@ timeline, whoever you were talking to and wherever you were talking to them.
 - **One database.** Every platform lands in the same tables, told apart by a `platform` column.
 - **Safe to re-run.** Meta exports repeat the last few months every time; already-imported
   messages are skipped and already-stored media is not copied again.
-- **Search that works in Czech.** Full-text over every message, diacritics-insensitive —
-  `necekal` finds `nečekal`.
+- **Search that works in Czech.** Full-text over every message, diacritics-insensitive, and
+  aware of Czech inflection: search `hospoda` and you also get `hospody`, `hospodě`, `hospodu`.
+  Combine words with `OR`, `-` and brackets.
 - **One person, many accounts.** Link someone's Discord, Facebook and Instagram identities and
   give them a name; that name is what the whole app shows.
 - **Nothing leaves the machine.** No cloud, no CDN, no telemetry. The archive is a file you own,
@@ -27,8 +28,13 @@ cd chat-archive/app
 pip install -r requirements.txt
 cd web && npm install && npm run build && cd ..
 
+py -m archive czech-dict     # build the Czech dictionary search widens words with
 py -m archive serve          # http://127.0.0.1:8765
 ```
+
+`czech-dict` takes about fifteen seconds and writes a 149 MB file next to your archive. Skip it
+and everything still works — search just matches words literally instead of in every inflected
+form. The dictionary's licence is non-commercial; see `data/czech/NOTICE.md`.
 
 The first run opens on **Connect a database**, because the archive lives wherever you keep it.
 Choose **Start an empty archive…**, pick a location, and you have somewhere to import into. If
@@ -58,29 +64,23 @@ free, open-source tool that saves your history to a `.dht` file (SQLite) as you 
 settings, turn **attachment downloading on**: Discord's CDN links are signed and expire about a
 day after they are issued, so anything not downloaded while it is fresh is gone for good.
 
-To bring that into the archive, put the tracker's file in this project's `Archives/` folder as
-`discord_archive.dht` and run:
+The `.dht` file it writes is imported like any other export — leave it wherever the tracker keeps
+it. Re-import it whenever you have scraped more; only new messages are added.
 
-```
-cd Archives
-py sync_dht.py                # appends new messages into discord_archive_custom.sqlite
-```
+## Importing
 
-Connect that `Archives/discord_archive_custom.sqlite` in the app and it becomes your archive —
-import your Meta exports into the same file. `py -m archive discord-media` afterwards recovers
-any attachments the tracker embedded. Re-run `sync_dht.py` whenever you scrape more; it only ever
-appends.
-
-## Importing an export
-
-Open the **Import** page, press **Choose a folder…**, pick the unzipped export folder, check what
-was detected, and import. Or from a terminal:
+Open the **Import** page and press **Choose a folder…** for an unzipped Facebook or Instagram
+export, or **Choose a .dht file…** for Discord. Check what was detected, and import. Or from a
+terminal:
 
 ```
 py -m archive ingest "C:/path/to/your_instagram_activity"
+py -m archive ingest "C:/path/to/discord_archive.dht"
 ```
 
-Either way it is safe to re-run. Once imported, the media has been copied into the archive's
+Either way it is safe to re-run: anything already in the archive is skipped. Attachments come
+along with the messages — for Discord that means whatever the tracker managed to embed, which is
+why turning its downloading on matters. Once imported, media has been copied into the archive's
 vault, so you can delete the export folder.
 
 ## Then

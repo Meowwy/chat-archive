@@ -3,7 +3,7 @@
 This folder contains a custom mirror of my Discord History Tracker (DHT) archive plus scripts to back up message attachments to my external drive.
 
 - **Source (read-only, written by the DHT app):** `discord_archive.dht` (+ `-wal`, `-shm`)
-- **Owned mirror DB:** `discord_archive_custom.sqlite` — append-only copy of all DHT data, safe to query, customize, and back up.
+- **The archive:** `discord_archive_custom.sqlite` — append-only copy of all DHT data plus the Facebook and Instagram imports, safe to query, customize, and back up.
 - **Attachment archive on external drive:** `D:\4 Archives\discord_image_archive\`
   - `images\<channel_id>\YYYYMMDD_<msg_id>_<idx>.<ext>`
   - `files\<channel_id>\YYYYMMDD_<msg_id>_<idx>.<ext>`
@@ -20,7 +20,7 @@ py download_files.py
 
 ### What each step does
 
-1. **`sync_dht.py`** — Takes a safe online-backup snapshot of the live `.dht` and **appends new rows** into `discord_archive_custom.sqlite`. Existing rows are never overwritten or deleted, so nothing in the mirror can be lost even if DHT later loses or rewrites it. Idempotent: running it again with no new messages does nothing.
+1. **`sync_dht.py`** — A wrapper around the app's importer (`py -m archive ingest <file.dht>`, or the **Import** page). Takes a safe online-backup snapshot of the live `.dht` and **appends new rows** into whichever archive the app is connected to. Existing rows are never overwritten or deleted, so nothing can be lost even if DHT later loses or rewrites it. Idempotent: running it again with no new messages does nothing, and it now stores whatever attachments DHT embedded into the media vault as it goes.
 
 2. **`download_images.py`** — Downloads every image attachment (`type LIKE 'image/%'`) referenced in the mirror to `D:\4 Archives\discord_image_archive\images\`. Successes are skipped on re-runs; failures (e.g. expired Discord URLs) are retried automatically. Tracks every attempt in the `downloaded_images` table.
 

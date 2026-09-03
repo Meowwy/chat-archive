@@ -61,6 +61,9 @@
 		--muted: #8b93a7;
 		--accent: #6ea8ff;
 		--mine: #2b4a7d;
+		/* Timeline authorship: me on the left in blue, them on the right in pink. */
+		--me: #3d9bff;
+		--them: #ff5fa2;
 		--radius: 10px;
 		color-scheme: dark;
 	}
@@ -75,6 +78,8 @@
 			--muted: #64708a;
 			--accent: #1f6feb;
 			--mine: #d3e3ff;
+			--me: #1f6feb;
+			--them: #e0357f;
 			color-scheme: light;
 		}
 	}

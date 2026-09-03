@@ -12,7 +12,11 @@ from __future__ import annotations
 import subprocess
 import sys
 
+# The path comes back as raw UTF-8 bytes rather than through print(). Windows
+# consoles are cp1250 here, so a printed "G:\\Můj disk" would reach the parent
+# as "G:\\MĹŻj disk" - a path that does not exist.
 _SCRIPT = """
+import sys
 import tkinter as tk
 from tkinter import filedialog
 
@@ -21,31 +25,39 @@ root.withdraw()
 root.attributes("-topmost", True)
 path = filedialog.{call}
 root.destroy()
-print(path or "")
+sys.stdout.buffer.write((path or "").encode("utf-8"))
 """
 
 _DB_TYPES = '[("Archive database", "*.sqlite *.db *.sqlite3"), ("All files", "*.*")]'
+_DHT_TYPES = '[("Discord History Tracker", "*.dht"), ("All files", "*.*")]'
 
 
 def _ask(call: str, timeout: int) -> str | None:
     try:
         result = subprocess.run(
             [sys.executable, "-c", _SCRIPT.format(call=call)],
-            capture_output=True,
-            text=True,
+            capture_output=True,  # bytes, decoded below - never the console codepage
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return None
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "the file dialog failed")
-    path = result.stdout.strip()
-    return path or None
+        message = result.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(message or "the file dialog failed")
+    return result.stdout.decode("utf-8").strip() or None
 
 
 def ask_directory(timeout: int = 300) -> str | None:
     """Open a folder chooser. Returns the path, or None if cancelled."""
     return _ask('askdirectory(title="Select the exported chat folder")', timeout)
+
+
+def ask_dht(timeout: int = 300) -> str | None:
+    """Open a file chooser for a Discord History Tracker file."""
+    return _ask(
+        f'askopenfilename(title="Select a Discord History Tracker file", filetypes={_DHT_TYPES})',
+        timeout,
+    )
 
 
 def ask_database(timeout: int = 300) -> str | None:

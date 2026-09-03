@@ -4,6 +4,7 @@ const time = new Intl.DateTimeFormat(LOCALE, { hour: '2-digit', minute: '2-digit
 const day = new Intl.DateTimeFormat(LOCALE, { day: 'numeric', month: 'long', year: 'numeric' });
 const dayShort = new Intl.DateTimeFormat(LOCALE, { day: 'numeric', month: 'numeric', year: 'numeric' });
 const monthName = new Intl.DateTimeFormat(LOCALE, { month: 'short', year: 'numeric' });
+const monthOnly = new Intl.DateTimeFormat(LOCALE, { month: 'short', timeZone: 'UTC' });
 const full = new Intl.DateTimeFormat(LOCALE, { dateStyle: 'full', timeStyle: 'medium' });
 
 export const formatTime = (ms) => time.format(new Date(ms));
@@ -11,6 +12,10 @@ export const formatDay = (ms) => day.format(new Date(ms));
 export const formatDayShort = (ms) => dayShort.format(new Date(ms));
 export const formatFull = (ms) => full.format(new Date(ms));
 export const formatMonth = (key) => monthName.format(new Date(`${key}-01T00:00:00Z`));
+export const formatMonthShort = (key) => monthOnly.format(new Date(`${key}-01T00:00:00Z`));
+
+// The database buckets months in UTC, so the scrubber has to jump in UTC too.
+export const monthStart = (key) => Date.parse(`${key}-01T00:00:00Z`);
 
 export const dayKey = (ms) => {
 	const d = new Date(ms);

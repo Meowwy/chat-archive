@@ -14,9 +14,6 @@ your_facebook_activity/
 your_instagram_activity/
 *_activity/
 
-# Identity mapping - real names, and only a mirror of the `people` table
-app/people.yaml
-
 # Which database this machine is connected to
 app/settings.local.json
 

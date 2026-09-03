@@ -1,192 +1,164 @@
 <script>
+	import { tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { api, mediaUrl } from '$lib/api.js';
-	import Message from '$lib/Message.svelte';
+	import SearchPanel from '$lib/SearchPanel.svelte';
+	import ThreadColumn from '$lib/ThreadColumn.svelte';
 	import {
-		dayKey,
 		formatCount,
-		formatDay,
-		formatMonth,
+		formatMonthShort,
+		monthStart,
 		platformColor,
 		platformLabel
 	} from '$lib/format.js';
-
-	const PAGE = 150;
-	const NEAR_EDGE = 400;
 
 	let threadId = $derived($page.params.id);
 	let anchorId = $derived($page.url.searchParams.get('at'));
 
 	let thread = $state(null);
-	let messages = $state([]);
-	let hasOlder = $state(true);
-	let hasNewer = $state(false);
-	let busy = $state(false);
 	let error = $state(null);
-	let highlight = $state(null);
 	let lightbox = $state(null);
-	let scroller = $state(null);
+	let shownIds = $state([]);
+	let allParticipants = $state(false);
+	let searching = $state(false);
+	// One entry per visible chat, so the scrubber can drive them all at once.
+	let columns = $state({});
 
-	// Reload whenever the route or the search anchor changes.
 	$effect(() => {
 		const id = threadId;
 		const at = anchorId;
 		let cancelled = false;
 
 		thread = null;
-		messages = [];
 		error = null;
-		highlight = at;
 
-		(async () => {
-			try {
-				const [detail, page1] = await Promise.all([
-					api.thread(id),
-					api.messages(id, at ? { at, limit: PAGE } : { limit: PAGE })
-				]);
+		api
+			.thread(id)
+			.then((detail) => {
 				if (cancelled) return;
 				thread = detail;
-				messages = page1.messages;
-				hasOlder = page1.messages.length > 0;
-				hasNewer = Boolean(at);
-				await tick();
-				if (cancelled) return;
-				if (at) scrollToMessage(at);
-				else scrollToBottom();
-			} catch (e) {
-				if (!cancelled) error = e.message;
-			}
-		})();
+				// Arriving from a search hit means one message matters, so show
+				// only its chat; arriving from the list means show the person.
+				shownIds = at ? [id] : detail.group.threads.map((t) => t.id);
+			})
+			.catch((e) => !cancelled && (error = e.message));
 
 		return () => (cancelled = true);
 	});
 
-	const tick = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+	let siblings = $derived(thread?.group.threads ?? []);
+	let shown = $derived(siblings.filter((t) => shownIds.includes(t.id)));
+	let title = $derived(thread ? (thread.group.person ?? thread.name) : '');
 
-	function scrollToBottom() {
-		if (scroller) scroller.scrollTop = scroller.scrollHeight;
+	function toggle(id) {
+		if (!shownIds.includes(id)) {
+			// Rebuild from the sibling order so the columns never shuffle.
+			shownIds = siblings.filter((t) => t.id === id || shownIds.includes(t.id)).map((t) => t.id);
+		} else if (shownIds.length > 1) {
+			shownIds = shownIds.filter((x) => x !== id);
+		}
 	}
 
-	function scrollToMessage(id) {
-		const element = document.getElementById(`m${id}`);
-		if (element) element.scrollIntoView({ block: 'center' });
-		else scrollToBottom();
-	}
+	// ----------------------------------------------------------- timeline
 
-	async function loadOlder() {
-		if (busy || !hasOlder || messages.length === 0) return;
-		busy = true;
-		const before = messages[0].timestamp;
-		const anchorTop = scroller.scrollHeight - scroller.scrollTop;
-		try {
-			const data = await api.messages(threadId, { before, limit: PAGE });
-			if (data.messages.length === 0) {
-				hasOlder = false;
-			} else {
-				messages = [...data.messages, ...messages];
-				await tick();
-				// Keep the viewport pinned to the same message after prepending.
-				scroller.scrollTop = scroller.scrollHeight - anchorTop;
+	/** Month totals over the chats on show, split by who was talking. */
+	let months = $derived.by(() => {
+		const chosen = new Set(shownIds);
+		const map = new Map();
+		for (const row of thread?.months ?? []) {
+			if (!chosen.has(row.channel_id)) continue;
+			let month = map.get(row.month);
+			if (!month) {
+				month = { month: row.month, mine: 0, theirs: 0, messages: 0 };
+				map.set(row.month, month);
 			}
-		} catch (e) {
-			error = e.message;
-		} finally {
-			busy = false;
+			month.mine += row.mine;
+			month.theirs += row.theirs;
+			month.messages += row.messages;
 		}
-	}
-
-	async function loadNewer() {
-		if (busy || !hasNewer || messages.length === 0) return;
-		busy = true;
-		const after = messages[messages.length - 1].timestamp;
-		try {
-			const data = await api.messages(threadId, { after, limit: PAGE });
-			if (data.messages.length === 0) hasNewer = false;
-			else messages = [...messages, ...data.messages];
-		} catch (e) {
-			error = e.message;
-		} finally {
-			busy = false;
-		}
-	}
-
-	function onScroll() {
-		if (!scroller) return;
-		if (scroller.scrollTop < NEAR_EDGE) loadOlder();
-		else if (
-			hasNewer &&
-			scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < NEAR_EDGE
-		) {
-			loadNewer();
-		}
-	}
-
-	async function jumpToMonth(month) {
-		busy = true;
-		highlight = null;
-		try {
-			const data = await api.messages(threadId, { ts: month.first_ts, limit: PAGE });
-			messages = data.messages;
-			hasOlder = true;
-			hasNewer = true;
-			await tick();
-			if (scroller) scroller.scrollTop = Math.max(0, scroller.scrollHeight / 2 - 200);
-		} catch (e) {
-			error = e.message;
-		} finally {
-			busy = false;
-		}
-	}
-
-	async function jumpToEnd() {
-		busy = true;
-		highlight = null;
-		try {
-			const data = await api.messages(threadId, { limit: PAGE });
-			messages = data.messages;
-			hasOlder = true;
-			hasNewer = false;
-			await tick();
-			scrollToBottom();
-		} finally {
-			busy = false;
-		}
-	}
-
-	// Insert day separators and mark runs by the same sender.
-	let rendered = $derived.by(() => {
-		const output = [];
-		let previous = null;
-		for (const message of messages) {
-			const key = dayKey(message.timestamp);
-			if (!previous || dayKey(previous.timestamp) !== key) {
-				output.push({ kind: 'day', key: `d${message.message_id}`, timestamp: message.timestamp });
-				previous = null;
-			}
-			output.push({
-				kind: 'message',
-				key: message.message_id,
-				message,
-				grouped:
-					previous !== null &&
-					previous.sender_id === message.sender_id &&
-					message.timestamp - previous.timestamp < 5 * 60 * 1000
-			});
-			previous = message;
-		}
-		return output;
+		return [...map.values()].sort((a, b) => a.month.localeCompare(b.month));
 	});
+
+	// The busiest month on show fills the bar, so the shape rescales as chats
+	// are toggled instead of staying pinned to some absolute ceiling.
+	let peak = $derived(months.reduce((most, m) => Math.max(most, m.messages), 0));
 
 	let years = $derived.by(() => {
-		if (!thread) return [];
 		const map = new Map();
-		for (const month of thread.months) {
-			const year = month.month.slice(0, 4);
-			if (!map.has(year)) map.set(year, []);
-			map.get(year).push(month);
+		for (const month of months) {
+			const key = month.month.slice(0, 4);
+			let year = map.get(key);
+			if (!year) {
+				year = { year: key, months: [], mine: 0, theirs: 0, messages: 0 };
+				map.set(key, year);
+			}
+			year.months.push(month);
+			year.mine += month.mine;
+			year.theirs += month.theirs;
+			year.messages += month.messages;
 		}
-		return [...map.entries()].map(([year, months]) => ({ year, months }));
+		return [...map.values()];
 	});
+
+	let totals = $derived(
+		months.reduce(
+			(sum, m) => ({
+				messages: sum.messages + m.messages,
+				mine: sum.mine + m.mine,
+				theirs: sum.theirs + m.theirs
+			}),
+			{ messages: 0, mine: 0, theirs: 0 }
+		)
+	);
+
+	/** Who "me" and "them" are, for the legend. */
+	let names = $derived.by(() => {
+		const everyone = shown.flatMap((t) => t.participants);
+		const others = everyone.filter((p) => !p.is_self);
+		return {
+			mine: everyone.find((p) => p.is_self)?.name ?? 'me',
+			// In a group chat the pink half is the room, not one person.
+			theirs: thread?.group.person ?? (others.length === 1 ? others[0].name : 'everyone else')
+		};
+	});
+
+	/** Merge the participants of every visible chat, one row per person. */
+	let participants = $derived.by(() => {
+		const map = new Map();
+		for (const t of shown) {
+			for (const person of t.participants) {
+				const key = person.person_id ?? `u${person.id}`;
+				const seen = map.get(key);
+				if (seen) seen.messages += person.messages;
+				else map.set(key, { ...person, key });
+			}
+		}
+		return [...map.values()].sort((a, b) => b.messages - a.messages);
+	});
+
+	// A 270-person group chat would push the timeline off the bottom of the
+	// panel, and the timeline is what the panel is for.
+	const FEW = 12;
+	let visiblePeople = $derived(allParticipants ? participants : participants.slice(0, FEW));
+
+	function jumpToMonth(month) {
+		const ts = monthStart(month.month);
+		for (const t of shown) columns[t.id]?.jumpTo(ts);
+	}
+
+	function jumpToYear(year) {
+		jumpToMonth(year.months[0]);
+	}
+
+	/** Take a search hit to its message, opening its chat if it is hidden. */
+	async function showHit(hit) {
+		if (!shownIds.includes(hit.channel_id)) {
+			toggle(hit.channel_id);
+			// Wait for the column to mount before asking it to go anywhere.
+			await tick();
+		}
+		columns[hit.channel_id]?.jumpToMessage(hit.message_id);
+	}
 </script>
 
 <svelte:window
@@ -195,7 +167,7 @@
 	}}
 />
 
-<div class="thread">
+<div class="thread" class:withsearch={searching && thread}>
 	<aside>
 		{#if thread}
 			<div class="head">
@@ -203,39 +175,108 @@
 					{#if thread.avatar_sha256}
 						<img src={mediaUrl(thread.avatar_sha256)} alt="" />
 					{:else}
-						{thread.name.trim().charAt(0).toUpperCase() || '?'}
+						{title.trim().charAt(0).toUpperCase() || '?'}
 					{/if}
 				</div>
 				<div>
-					<h1>{thread.name}</h1>
+					<h1>{title}</h1>
 					<p class="sub">
-						{platformLabel(thread.platform)} · {formatCount(thread.messages)} messages
+						{#if siblings.length === 1}
+							{platformLabel(thread.platform)} · {formatCount(totals.messages)} messages
+						{:else}
+							{formatCount(totals.messages)} messages in {shown.length} of {siblings.length} chats
+						{/if}
 					</p>
 				</div>
 			</div>
 
-			<button class="wide" onclick={jumpToEnd}>Jump to the end ↓</button>
+			{#if siblings.length > 1}
+				<h2>Chats</h2>
+				<ul class="chats">
+					{#each siblings as chat (chat.id)}
+						{@const on = shownIds.includes(chat.id)}
+						<li>
+							<label class:off={!on}>
+								<input
+									type="checkbox"
+									checked={on}
+									disabled={on && shownIds.length === 1}
+									onchange={() => toggle(chat.id)}
+								/>
+								<span class="dot" style:--c={platformColor(chat.platform)}></span>
+								<span class="cname">{chat.name}</span>
+								<span class="ccount">{formatCount(chat.messages)}</span>
+							</label>
+						</li>
+					{/each}
+				</ul>
+				<p class="hint">At least one chat stays open.</p>
+			{/if}
 
 			<h2>Participants</h2>
 			<ul class="people">
-				{#each thread.participants as person (person.id)}
+				{#each visiblePeople as person (person.key)}
 					<li>
 						<span class="pname">{person.name}</span>
 						<span class="pcount">{formatCount(person.messages)}</span>
 					</li>
 				{/each}
 			</ul>
+			{#if participants.length > FEW}
+				<button class="more" onclick={() => (allParticipants = !allParticipants)}>
+					{allParticipants
+						? 'Show fewer'
+						: `Show all ${formatCount(participants.length)} people`}
+				</button>
+			{/if}
+
+			<button class="opensearch" onclick={() => (searching = !searching)}>
+				{searching ? 'Close search' : 'Open search'}
+			</button>
 
 			<h2>Timeline</h2>
+			<div class="legend">
+				<span><i class="swatch me"></i>{names.mine}</span>
+				<span><i class="swatch them"></i>{names.theirs}</span>
+			</div>
+			<div class="total">
+				<span>All time</span>
+				<span class="split">
+					{formatCount(totals.messages)}
+					<b>(<i class="me">{formatCount(totals.mine)}</i> /
+						<i class="them">{formatCount(totals.theirs)}</i>)</b>
+				</span>
+			</div>
+
 			<div class="timeline">
 				{#each years as group (group.year)}
 					<details open={years.length <= 2}>
-						<summary>{group.year}</summary>
+						<summary>
+							<span class="ylabel">{group.year}</span>
+							<span class="split">
+								{formatCount(group.messages)}
+								<b>(<i class="me">{formatCount(group.mine)}</i> /
+									<i class="them">{formatCount(group.theirs)}</i>)</b>
+							</span>
+						</summary>
+						<button class="yjump" onclick={() => jumpToYear(group)}>
+							Jump to {group.year} ↑
+						</button>
 						{#each group.months as month (month.month)}
 							<button class="month" onclick={() => jumpToMonth(month)}>
-								<span>{formatMonth(month.month)}</span>
-								<span class="bar" style:--w="{Math.min(100, month.messages / 40)}%"></span>
-								<span class="mcount">{formatCount(month.messages)}</span>
+								<span class="mlabel">{formatMonthShort(month.month)}</span>
+								<span class="bar" style:--w="{peak ? (month.messages / peak) * 100 : 0}%">
+									<span
+										class="me"
+										style:--p="{month.messages ? (month.mine / month.messages) * 100 : 0}%"
+									></span>
+									<span class="them"></span>
+								</span>
+								<span class="split">
+									{formatCount(month.messages)}
+									<b>(<i class="me">{formatCount(month.mine)}</i> /
+										<i class="them">{formatCount(month.theirs)}</i>)</b>
+								</span>
 							</button>
 						{/each}
 					</details>
@@ -244,33 +285,34 @@
 		{/if}
 	</aside>
 
-	<section
-		class="stream"
-		bind:this={scroller}
-		onscroll={onScroll}
-		role="log"
-		aria-label="Messages"
-	>
+	<div class="columns">
 		{#if error}
 			<p class="note error">{error}</p>
 		{:else if !thread}
 			<p class="note">Loading…</p>
 		{:else}
-			{#if busy}<p class="note sticky">Loading…</p>{/if}
-			{#each rendered as item (item.key)}
-				{#if item.kind === 'day'}
-					<div class="day"><span>{formatDay(item.timestamp)}</span></div>
-				{:else}
-					<Message
-						message={item.message}
-						grouped={item.grouped}
-						highlighted={highlight === item.message.message_id}
-						onimage={(a) => (lightbox = a)}
-					/>
-				{/if}
+			{#each shown as chat (chat.id)}
+				<ThreadColumn
+					bind:this={columns[chat.id]}
+					thread={chat}
+					startAt={chat.id === threadId ? anchorId : null}
+					highlight={chat.id === threadId ? anchorId : null}
+					showHeader={siblings.length > 1}
+					onclose={shown.length > 1 ? toggle : null}
+					onimage={(a) => (lightbox = a)}
+				/>
 			{/each}
 		{/if}
-	</section>
+	</div>
+
+	{#if searching && thread}
+		<SearchPanel
+			threads={siblings}
+			showThread={siblings.length > 1}
+			onhit={showHit}
+			onclose={() => (searching = false)}
+		/>
+	{/if}
 </div>
 
 {#if lightbox}
@@ -284,8 +326,14 @@
 <style>
 	.thread {
 		display: grid;
-		grid-template-columns: 270px 1fr;
+		grid-template-columns: 340px 1fr;
 		height: 100%;
+		min-height: 0;
+	}
+
+	/* The search panel is the mirror of the sidebar: same width, other side. */
+	.thread.withsearch {
+		grid-template-columns: 340px 1fr 340px;
 	}
 
 	aside {
@@ -293,6 +341,12 @@
 		background: var(--panel);
 		overflow-y: auto;
 		padding: 14px;
+	}
+
+	.columns {
+		display: flex;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.head {
@@ -340,16 +394,83 @@
 		margin: 18px 0 6px;
 	}
 
-	.wide {
-		width: 100%;
-		margin-top: 12px;
-	}
-
+	.chats,
 	.people {
 		list-style: none;
 		margin: 0;
 		padding: 0;
 		font-size: 13px;
+	}
+
+	.chats label {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		padding: 4px 4px;
+		border-radius: 6px;
+		cursor: pointer;
+	}
+
+	.chats label:hover {
+		background: var(--panel-2);
+	}
+
+	.chats label.off {
+		opacity: 0.5;
+	}
+
+	.chats input {
+		width: 14px;
+		height: 14px;
+		flex: none;
+		accent-color: var(--accent);
+	}
+
+	.dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--c);
+		flex: none;
+	}
+
+	.cname {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.ccount {
+		margin-left: auto;
+		color: var(--muted);
+		font-variant-numeric: tabular-nums;
+		font-size: 12px;
+	}
+
+	.more {
+		border: none;
+		background: none;
+		color: var(--muted);
+		font-size: 12px;
+		padding: 4px 0 0;
+		text-align: left;
+	}
+
+	.more:hover {
+		color: var(--accent);
+	}
+
+	.opensearch {
+		display: block;
+		width: 100%;
+		margin-top: 14px;
+		font-size: 12px;
+	}
+
+	.hint {
+		margin: 4px 0 0;
+		font-size: 11px;
+		color: var(--muted);
 	}
 
 	.people li {
@@ -370,18 +491,104 @@
 		font-variant-numeric: tabular-nums;
 	}
 
+	.legend {
+		display: flex;
+		gap: 12px;
+		font-size: 11px;
+		color: var(--muted);
+		margin-bottom: 6px;
+	}
+
+	.legend span {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		min-width: 0;
+	}
+
+	.swatch {
+		width: 9px;
+		height: 9px;
+		border-radius: 2px;
+		flex: none;
+	}
+
+	.swatch.me {
+		background: var(--me);
+	}
+
+	.swatch.them {
+		background: var(--them);
+	}
+
+	.total {
+		display: flex;
+		justify-content: space-between;
+		gap: 8px;
+		font-size: 12px;
+		padding: 5px 4px;
+		border-top: 1px solid var(--line);
+		border-bottom: 1px solid var(--line);
+	}
+
+	.split {
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		text-align: right;
+	}
+
+	.split b {
+		font-weight: 400;
+		color: var(--muted);
+		font-size: 11px;
+	}
+
+	/* The two halves of the bar, named in the numbers beside it. */
+	.split i {
+		font-style: normal;
+	}
+
+	.split i.me {
+		color: var(--me);
+	}
+
+	.split i.them {
+		color: var(--them);
+	}
+
 	.timeline summary {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
 		cursor: pointer;
-		font-weight: 600;
 		font-size: 13px;
-		padding: 4px 0;
+		padding: 5px 0;
+	}
+
+	.ylabel {
+		font-weight: 600;
+	}
+
+	.yjump {
+		width: 100%;
+		border: none;
+		background: none;
+		color: var(--muted);
+		font-size: 11px;
+		text-align: left;
+		padding: 2px 0 4px 8px;
+	}
+
+	.yjump:hover {
+		color: var(--accent);
 	}
 
 	.month {
 		display: grid;
-		grid-template-columns: 78px 1fr 40px;
+		grid-template-columns: 34px 1fr auto;
 		align-items: center;
-		gap: 6px;
+		gap: 7px;
 		width: 100%;
 		border: none;
 		background: none;
@@ -396,59 +603,36 @@
 		color: var(--text);
 	}
 
-	.month > span:first-child {
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+	.mlabel {
 		text-align: left;
 	}
 
 	.bar {
-		height: 5px;
-		border-radius: 3px;
-		background: var(--accent);
-		width: var(--w);
-		min-width: 2px;
-		opacity: 0.55;
-	}
-
-	.mcount {
-		text-align: right;
-		font-variant-numeric: tabular-nums;
-	}
-
-	.stream {
-		overflow-y: auto;
-		padding: 10px 24px 40px;
 		display: flex;
-		flex-direction: column;
-	}
-
-	.day {
-		text-align: center;
-		margin: 18px 0 6px;
-		font-size: 12px;
-		color: var(--muted);
-	}
-
-	.day span {
+		height: 7px;
+		border-radius: 3px;
+		overflow: hidden;
+		width: var(--w);
+		min-width: 3px;
 		background: var(--panel-2);
-		border-radius: 999px;
-		padding: 3px 12px;
+	}
+
+	.bar .me {
+		width: var(--p);
+		background: var(--me);
+		flex: none;
+	}
+
+	.bar .them {
+		flex: 1;
+		background: var(--them);
 	}
 
 	.note {
 		text-align: center;
 		color: var(--muted);
 		padding: 20px;
-	}
-
-	.note.sticky {
-		position: sticky;
-		top: 0;
-		background: var(--bg);
-		padding: 6px;
-		font-size: 12px;
+		width: 100%;
 	}
 
 	.error {
@@ -480,8 +664,15 @@
 		font-size: 13px;
 	}
 
+	@media (max-width: 1200px) {
+		.thread.withsearch {
+			grid-template-columns: 290px 1fr 300px;
+		}
+	}
+
 	@media (max-width: 760px) {
-		.thread {
+		.thread,
+		.thread.withsearch {
 			grid-template-columns: 1fr;
 		}
 		aside {

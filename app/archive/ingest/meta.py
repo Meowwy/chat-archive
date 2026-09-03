@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .. import vault
+from .. import noise, vault
 from ..ids import demojibake, media_entries, message_source_key, synth_id
 from .detect import ExportSource
 
@@ -36,6 +36,7 @@ class Stats:
     new_media: int = 0
     dup_media: int = 0
     missing_media: int = 0
+    skipped_notices: int = 0
     missing_examples: list[str] = field(default_factory=list)
 
     def merge(self, other: "Stats") -> None:
@@ -204,6 +205,17 @@ class MetaIngest:
 
     def _ingest_message(self, channel_id: int, thread_path: str, message: dict) -> None:
         self.stats.msgs_seen += 1
+        text = demojibake(message.get("content", "")) or ""
+        # "Reacted 😂 to your message" is Instagram narrating a reaction it also
+        # attached to the message it belongs to. Drop it, but never when it
+        # carries anything of its own.
+        if (
+            noise.is_reaction_notice(text)
+            and not message.get("share")
+            and not any(True for _ in media_entries(message))
+        ):
+            self.stats.skipped_notices += 1
+            return
         source_key = message_source_key(self.platform, thread_path, message)
         message_id = synth_id(source_key)
 
@@ -226,7 +238,7 @@ class MetaIngest:
                 message_id,
                 sender_id,
                 channel_id,
-                demojibake(message.get("content", "")) or "",
+                text,
                 int(message["timestamp_ms"]),
                 self.platform,
                 source_key,

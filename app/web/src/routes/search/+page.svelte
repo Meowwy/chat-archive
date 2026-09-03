@@ -1,6 +1,7 @@
 <script>
 	import { api } from '$lib/api.js';
-	import { formatCount, formatDayShort, platformColor, platformLabel } from '$lib/format.js';
+	import SearchHit from '$lib/SearchHit.svelte';
+	import { formatCount, platformLabel } from '$lib/format.js';
 
 	let query = $state('');
 	let platform = $state('all');
@@ -11,6 +12,15 @@
 
 	const LIMIT = 60;
 	const filters = ['all', 'discord', 'facebook', 'instagram'];
+
+	// Which words the server widened to a whole Czech paradigm, named by their
+	// lemma - "hospody" was searched as every form of "hospoda".
+	const widened = $derived(
+		(result?.terms ?? [])
+			.filter((t) => t.forms > 1)
+			.map((t) => t.lemmas.join('/'))
+			.join(', ')
+	);
 
 	async function run(newOffset = 0) {
 		const text = query.trim();
@@ -31,20 +41,6 @@
 		}
 	}
 
-	/**
-	 * The API returns a snippet with <mark> tags already applied; split it so the
-	 * template can render the marked runs without injecting raw HTML.
-	 */
-	function segments(snippet) {
-		return snippet
-			.split(/(<mark>.*?<\/mark>)/g)
-			.filter(Boolean)
-			.map((chunk) =>
-				chunk.startsWith('<mark>')
-					? { hit: true, text: chunk.slice(6, -7) }
-					: { hit: false, text: chunk }
-			);
-	}
 </script>
 
 <div class="wrap">
@@ -56,7 +52,7 @@
 	>
 		<input
 			type="search"
-			placeholder="Search every message… (diacritics are ignored)"
+			placeholder="Search every message… (any inflected form; diacritics are ignored)"
 			bind:value={query}
 			{@attach (node) => node.focus()}
 		/>
@@ -77,6 +73,15 @@
 		<button type="submit" disabled={loading}>Search</button>
 	</form>
 
+	<p class="syntax">
+		<code>pivo hospoda</code> both ·
+		<code>pivo OR hospoda</code> either ·
+		<code>(pivo OR víno) hospoda</code> grouped ·
+		<code>pivo -hospoda</code> excluded ·
+		<code>"hospody"</code> this exact form ·
+		<code>hospod*</code> starts with
+	</p>
+
 	{#if error}
 		<p class="note error">{error}</p>
 	{:else if loading && !result}
@@ -84,23 +89,14 @@
 	{:else if result}
 		<p class="note count">
 			{formatCount(result.total)} results
+			{#if widened}
+				<span class="widened">· also in every form of {widened}</span>
+			{/if}
 		</p>
 		<ul>
 			{#each result.hits as hit (hit.message_id)}
 				<li>
-					<a href="/t/{hit.channel_id}?at={hit.message_id}">
-						<div class="top">
-							<span class="dot" style:--c={platformColor(hit.platform)}></span>
-							<span class="thread">{hit.thread_name}</span>
-							<span class="sender">{hit.sender}</span>
-							<span class="when">{formatDayShort(hit.timestamp)}</span>
-						</div>
-						<p class="snippet">
-							{#each segments(hit.snippet) as part, i (i)}
-								{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}
-							{/each}
-						</p>
-					</a>
+					<SearchHit {hit} href="/t/{hit.channel_id}?at={hit.message_id}" />
 				</li>
 			{/each}
 		</ul>
@@ -158,50 +154,6 @@
 		gap: 6px;
 	}
 
-	li a {
-		display: block;
-		padding: 10px 12px;
-		background: var(--panel);
-		border: 1px solid var(--line);
-		border-radius: var(--radius);
-		text-decoration: none;
-		color: inherit;
-	}
-
-	li a:hover {
-		border-color: var(--accent);
-	}
-
-	.top {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: 12px;
-		color: var(--muted);
-	}
-
-	.dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		background: var(--c);
-		flex: none;
-	}
-
-	.thread {
-		font-weight: 600;
-		color: var(--text);
-	}
-
-	.when {
-		margin-left: auto;
-	}
-
-	.snippet {
-		margin: 4px 0 0;
-		overflow-wrap: anywhere;
-	}
-
 	.note {
 		color: var(--muted);
 		padding: 20px 0;
@@ -216,6 +168,25 @@
 
 	.error {
 		color: #ff8a8a;
+	}
+
+	.syntax {
+		margin: 0 0 14px;
+		font-size: 12px;
+		color: var(--muted);
+		line-height: 1.9;
+	}
+
+	.syntax code {
+		background: var(--panel);
+		border: 1px solid var(--line);
+		border-radius: 4px;
+		padding: 1px 5px;
+		font-size: 11px;
+	}
+
+	.widened {
+		color: var(--muted);
 	}
 
 	.more {

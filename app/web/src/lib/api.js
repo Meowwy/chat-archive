@@ -9,9 +9,22 @@ async function get(path, params) {
 	}
 	const response = await fetch(url);
 	if (!response.ok) {
-		throw new Error(`${response.status} ${await response.text()}`);
+		throw await failure(response);
 	}
 	return response.json();
+}
+
+// FastAPI puts the human-readable reason in `detail`; show that, not the JSON.
+// A rejected search says what is wrong with it, so this is the text to surface.
+async function failure(response) {
+	const text = await response.text();
+	let message = text;
+	try {
+		message = JSON.parse(text).detail ?? text;
+	} catch {
+		// not JSON - use the raw body
+	}
+	return new Error(message || `HTTP ${response.status}`);
 }
 
 async function send(method, path, body) {
@@ -21,15 +34,7 @@ async function send(method, path, body) {
 		body: JSON.stringify(body ?? {})
 	});
 	if (!response.ok) {
-		// FastAPI puts the human-readable reason in `detail`; show that, not the JSON.
-		const text = await response.text();
-		let message = text;
-		try {
-			message = JSON.parse(text).detail ?? text;
-		} catch {
-			// not JSON - use the raw body
-		}
-		throw new Error(message || `HTTP ${response.status}`);
+		throw await failure(response);
 	}
 	return response.json();
 }
@@ -46,13 +51,13 @@ export const api = {
 	messages: (id, params) => get(`/threads/${id}/messages`, params),
 	search: (params) => get('/search', params),
 	people: () => get('/people'),
-	applyPeople: () => post('/people/apply'),
 	createPerson: (body) => post('/people', body),
 	updatePerson: (personId, body) => send('PATCH', `/people/${personId}`, body),
 	deletePerson: (personId) => send('DELETE', `/people/${personId}`),
 	linkIdentities: (personId, userIds) =>
 		post('/people/link', { person_id: personId, user_ids: userIds }),
 	pickFolder: () => post('/ingest/pick-folder'),
+	pickDht: () => post('/ingest/pick-dht'),
 	inspect: (path) => post('/ingest/inspect', { path }),
 	history: () => get('/ingest/history')
 };

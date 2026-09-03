@@ -160,13 +160,6 @@
 			() => api.deletePerson(person.person_id)
 		);
 	}
-
-	function applyYaml() {
-		run(
-			(r) => `${formatCount(r.people)} people, ${formatCount(r.linked)} identities linked.`,
-			() => api.applyPeople()
-		);
-	}
 </script>
 
 <div class="wrap">
@@ -323,14 +316,6 @@
 		{#if visible.length === 0}
 			<p class="muted empty">Nothing matches the filter.</p>
 		{/if}
-
-		<div class="bar">
-			<code>{data.yaml_path}</code>
-			<span class="muted small">rewritten on every change</span>
-			<button class="tiny ghost" onclick={applyYaml} disabled={busy}>
-				Load the file and link
-			</button>
-		</div>
 	{:else if !error}
 		<p class="muted">Loading…</p>
 	{/if}
@@ -597,24 +582,6 @@
 		height: 8px;
 		border-radius: 50%;
 		background: var(--c);
-	}
-
-	.bar {
-		display: flex;
-		gap: 10px;
-		align-items: center;
-		flex-wrap: wrap;
-		background: var(--panel);
-		border: 1px solid var(--line);
-		border-radius: var(--radius);
-		padding: 10px 12px;
-		margin-top: 26px;
-	}
-
-	.bar code {
-		font-size: 12px;
-		color: var(--muted);
-		overflow-wrap: anywhere;
 	}
 
 	.tray {

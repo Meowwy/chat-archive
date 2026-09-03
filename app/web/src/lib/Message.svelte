@@ -12,7 +12,14 @@
 	let shares = $derived(message.embeds.filter((e) => e.link || e.url));
 </script>
 
-<article class:mine={message.is_self} class:grouped class:highlighted id="m{message.message_id}">
+<article
+	class:mine={message.is_self}
+	class:grouped
+	class:highlighted
+	id="m{message.message_id}"
+	data-mid={message.message_id}
+	data-ts={message.timestamp}
+>
 	{#if !grouped}
 		<div class="meta">
 			<span class="sender">{message.sender}</span>
@@ -178,6 +185,7 @@
 
 	.file {
 		display: flex;
+		max-width: 100%;
 		align-items: center;
 		gap: 8px;
 		margin-top: 6px;
@@ -200,6 +208,9 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		/* Without this a 100-character Discord filename refuses to shrink and
+		   pushes a horizontal scrollbar across the whole conversation. */
+		min-width: 0;
 	}
 
 	.fsize {

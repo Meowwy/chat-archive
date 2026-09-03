@@ -3,9 +3,10 @@
     py -m archive db [<path>] [--create] show, connect, or create an archive
     py -m archive setup                 migrate + fold local Discord media in
     py -m archive migrate               apply schema changes only
-    py -m archive ingest <folder>       ingest a Facebook/Instagram export
+    py -m archive clean                 drop Instagram's reaction pseudo-messages
+    py -m archive ingest <path>         import a Meta export folder or a .dht file
     py -m archive discord-media         recover DHT-embedded blobs and downloads
-    py -m archive people scaffold|apply|list
+    py -m archive people            list every identity and who it belongs to
     py -m archive stats                 what is in the archive right now
     py -m archive serve                 run the local web viewer
 """
@@ -17,7 +18,7 @@ import sys
 
 from pathlib import Path
 
-from . import config, db, migrate
+from . import config, db, migrate, noise
 from .ingest import people as people_mod
 from .ingest import runner
 
@@ -68,6 +69,17 @@ def cmd_migrate(_args) -> int:
     return 0
 
 
+def cmd_clean(_args) -> int:
+    """Remove the 'Reacted 😂 to your message' rows Instagram exports contain."""
+    con = db.connect()
+    try:
+        migrate.ensure_schema(con)
+        noise.purge_reaction_notices(con)
+    finally:
+        con.close()
+    return 0
+
+
 def cmd_discord_media(_args) -> int:
     con = db.connect()
     try:
@@ -96,29 +108,24 @@ def cmd_ingest(args) -> int:
             f"media {stats.media_seen} ({stats.new_media} new, {stats.dup_media} already stored, "
             f"{stats.missing_media} missing)"
         )
+        if stats.skipped_notices:
+            _print(f"    ignored {stats.skipped_notices} reaction notices")
         for example in stats.missing_examples:
             _print(f"    missing: {example}")
     return 0
 
 
-def cmd_people(args) -> int:
+def cmd_people(_args) -> int:
+    """List identities; linking them is the People page's job."""
     con = db.connect()
     try:
         migrate.ensure_schema(con)
-        if args.action == "scaffold":
-            path = people_mod.scaffold(con)
-            _print(f"[people] mapping file: {path}")
-            _print("[people] edit it, then run: py -m archive people apply")
-        elif args.action == "apply":
-            count, linked = people_mod.apply(con)
-            _print(f"[people] {count} people, {linked} identities linked")
-        else:
-            for row in people_mod.identities(con):
-                mark = " " if row["person_id"] else "?"
-                _print(
-                    f"{mark} {row['platform']:<10} {row['messages']:>7,}  "
-                    f"{row['display_name'] or row['name']}"
-                )
+        for row in people_mod.identities(con):
+            mark = " " if row["person_id"] else "?"
+            _print(
+                f"{mark} {row['platform']:<10} {row['messages']:>7,}  "
+                f"{row['display_name'] or row['name']}"
+            )
     finally:
         con.close()
     return 0
@@ -157,6 +164,19 @@ def cmd_stats(_args) -> int:
     return 0
 
 
+def cmd_czech_dict(args) -> int:
+    """Compile the Czech dictionary that widens a search to whole paradigms."""
+    from . import czech
+
+    dest = Path(args.out) if args.out else config.DEFAULT_LEXICON
+    if dest.is_file() and not args.force:
+        _print(f"[czech-dict] already built: {dest} (use --force to rebuild)")
+        return 0
+    _print(f"[czech-dict] reading {config.CZECH_DATA}")
+    czech.build(config.CZECH_DATA, dest)
+    return 0
+
+
 def cmd_serve(args) -> int:
     import uvicorn
 
@@ -180,19 +200,31 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("migrate", help="apply schema changes").set_defaults(func=cmd_migrate)
     sub.add_parser("setup", help="migrate and fold local Discord media in").set_defaults(func=cmd_setup)
+    sub.add_parser("clean", help="drop Instagram's reaction pseudo-messages").set_defaults(
+        func=cmd_clean
+    )
     sub.add_parser("discord-media", help="recover embedded blobs and downloads").set_defaults(
         func=cmd_discord_media
     )
     sub.add_parser("stats", help="show archive contents").set_defaults(func=cmd_stats)
 
-    p_ingest = sub.add_parser("ingest", help="ingest a Facebook/Instagram export folder")
-    p_ingest.add_argument("path")
+    p_czech = sub.add_parser(
+        "czech-dict", help="build the Czech dictionary that search widens words with"
+    )
+    p_czech.add_argument("--out", help="where to write it (default: beside the archive)")
+    p_czech.add_argument("--force", action="store_true", help="rebuild even if it exists")
+    p_czech.set_defaults(func=cmd_czech_dict)
+
+    p_ingest = sub.add_parser(
+        "ingest", help="import a Facebook/Instagram export folder or a Discord .dht file"
+    )
+    p_ingest.add_argument("path", help="an export folder, or the tracker's .dht file")
     p_ingest.add_argument("-q", "--quiet", dest="verbose", action="store_false", default=True)
     p_ingest.set_defaults(func=cmd_ingest)
 
-    p_people = sub.add_parser("people", help="cross-platform identity mapping")
-    p_people.add_argument("action", choices=["scaffold", "apply", "list"], nargs="?", default="list")
-    p_people.set_defaults(func=cmd_people)
+    sub.add_parser("people", help="list identities and the person each belongs to").set_defaults(
+        func=cmd_people
+    )
 
     p_serve = sub.add_parser("serve", help="run the local web viewer")
     p_serve.add_argument("--host", default=config.HOST)

@@ -18,9 +18,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, db
+from . import config, db, noise
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _has_column(con: sqlite3.Connection, table: str, column: str) -> bool:
@@ -203,6 +203,11 @@ _COLUMNS: list[tuple[str, str, str]] = [
     ("attachments", "sha256", "TEXT"),
 ]
 
+# Columns on tables this package owns, applied after they are created.
+_LATE_COLUMNS: list[tuple[str, str, str]] = [
+    ("ingest_log", "skipped_notices", "INTEGER DEFAULT 0"),
+]
+
 _TABLES = """
 CREATE TABLE IF NOT EXISTS people (
     person_id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,6 +247,7 @@ CREATE TABLE IF NOT EXISTS ingest_log (
     new_media    INTEGER DEFAULT 0,
     dup_media    INTEGER DEFAULT 0,
     missing_media INTEGER DEFAULT 0,
+    skipped_notices INTEGER DEFAULT 0,
     status       TEXT NOT NULL,
     error        TEXT
 );
@@ -304,6 +310,8 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     for table, column, decl in _COLUMNS:
         _add_column(con, table, column, decl)
     con.executescript(_TABLES)
+    for table, column, decl in _LATE_COLUMNS:
+        _add_column(con, table, column, decl)
     con.executescript(_INDEXES)
     con.executescript(_FTS)
     con.commit()
@@ -360,6 +368,12 @@ def migrate(*, make_backup: bool = True, verbose: bool = True) -> int:
         ensure_schema(con)
         if verbose:
             print("[migrate] schema applied")
+
+        # Instagram's "Reacted 😂 to your message" pseudo-messages are dropped
+        # at ingest time now; clear the ones earlier runs let through.
+        gone = noise.purge_reaction_notices(con, verbose=verbose)
+        if verbose and not gone:
+            print("[migrate] no reaction notices to clean")
 
         n = rebuild_fts(con)
         if verbose:

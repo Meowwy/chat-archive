@@ -14,7 +14,8 @@ from typing import Callable, Iterator
 
 from .. import db, migrate
 from . import discord as discord_ingest
-from .detect import ExportSource, detect
+from . import dht
+from .detect import DhtSource, ExportSource, detect
 from .meta import MetaIngest, Stats
 
 Progress = Callable[[str], None]
@@ -42,34 +43,49 @@ def _close_log(
         UPDATE ingest_log SET
             finished_at = ?, threads_seen = ?, new_threads = ?, msgs_seen = ?,
             new_msgs = ?, dup_msgs = ?, media_seen = ?, new_media = ?,
-            dup_media = ?, missing_media = ?, status = ?, error = ?
+            dup_media = ?, missing_media = ?, skipped_notices = ?,
+            status = ?, error = ?
         WHERE run_id = ?
         """,
         (
             int(time.time() * 1000),
             row["threads_seen"], row["new_threads"], row["msgs_seen"],
             row["new_msgs"], row["dup_msgs"], row["media_seen"], row["new_media"],
-            row["dup_media"], row["missing_media"], status, error, run_id,
+            row["dup_media"], row["missing_media"], row["skipped_notices"],
+            status, error, run_id,
         ),
     )
     con.commit()
 
 
+def _rollback(con: sqlite3.Connection) -> None:
+    """Undo a failed run. A source may have rolled back already."""
+    try:
+        con.execute("ROLLBACK")
+    except sqlite3.OperationalError:
+        pass
+
+
 def ingest_source(
     con: sqlite3.Connection,
-    source: ExportSource,
+    source: ExportSource | DhtSource,
     progress: Progress | None = None,
 ) -> Stats:
-    """Ingest one detected export inside a single transaction."""
+    """Ingest one detected source inside a single transaction."""
     progress = progress or (lambda _message: None)
-    run_id = _open_log(con, source.kind, str(source.marker_dir))
+    run_id = _open_log(con, source.kind, str(source.path))
     stats = Stats()
     try:
-        con.execute("BEGIN")
-        stats = MetaIngest(con, source, progress).run()
-        con.execute("COMMIT")
+        if isinstance(source, DhtSource):
+            # ATTACH is illegal inside a transaction, so that importer runs its
+            # own BEGIN/COMMIT rather than being wrapped in one here.
+            stats = dht.ingest(con, source.path, progress)
+        else:
+            con.execute("BEGIN")
+            stats = MetaIngest(con, source, progress).run()
+            con.execute("COMMIT")
     except BaseException as exc:
-        con.execute("ROLLBACK")
+        _rollback(con)
         _close_log(con, run_id, stats, "failed", traceback.format_exc(limit=5))
         progress(f"[error] {source.kind}: {exc}")
         raise
@@ -94,7 +110,7 @@ def ingest_discord_media(con: sqlite3.Connection, progress: Progress | None = No
 
 
 def ingest_path(path: str | Path, progress: Progress | None = None) -> list[tuple[str, Stats]]:
-    """Detect and ingest every Meta export at `path`."""
+    """Detect and ingest every export or tracker file at `path`."""
     progress = progress or (lambda _message: None)
     sources = detect(path)
     con = db.connect()
@@ -102,7 +118,7 @@ def ingest_path(path: str | Path, progress: Progress | None = None) -> list[tupl
         migrate.ensure_schema(con)
         results = []
         for source in sources:
-            progress(f"[ingest] {source.label}: {len(source.thread_files)} thread(s) from {source.marker_dir}")
+            progress(f"[ingest] {source.label}: {source.path}")
             results.append((source.kind, ingest_source(con, source, progress)))
         return results
     finally:
@@ -133,6 +149,7 @@ def stream_ingest(path: str | Path) -> Iterator[dict]:
                 "event": "source-done",
                 "kind": source.kind,
                 "label": source.label,
+                "path": str(source.path),
                 "stats": stats.as_row(),
                 "missing_examples": stats.missing_examples,
             }

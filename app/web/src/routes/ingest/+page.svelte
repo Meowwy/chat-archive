@@ -5,7 +5,7 @@
 	let path = $state('');
 	let sources = $state([]);
 	let detectError = $state(null);
-	let picking = $state(false);
+	let picking = $state(null);
 	let running = $state(false);
 	let results = $state([]);
 	let runError = $state(null);
@@ -21,13 +21,14 @@
 		api.dbStatus().then((status) => (database = status));
 	});
 
-	async function pick() {
-		picking = true;
+	/** Open a native dialog and show whatever it turned out to contain. */
+	async function pick(choose) {
+		picking = choose;
 		detectError = null;
 		results = [];
 		runError = null;
 		try {
-			const data = await api.pickFolder();
+			const data = choose === 'file' ? await api.pickDht() : await api.pickFolder();
 			if (data.path) {
 				path = data.path;
 				sources = data.sources ?? [];
@@ -36,7 +37,7 @@
 		} catch (e) {
 			detectError = e.message;
 		} finally {
-			picking = false;
+			picking = null;
 		}
 	}
 
@@ -75,9 +76,11 @@
 <div class="wrap">
 	<h1>Import exports</h1>
 	<p class="lead">
-		Pick the folder holding an export downloaded from Facebook or Instagram. The files are
-		copied into the archive, so the original folder is no longer needed afterwards. Messages
-		already in the archive are skipped.
+		Pick the folder holding an export downloaded from Facebook or Instagram, or the
+		<code class="inline">.dht</code> file Discord History Tracker writes. Everything is copied
+		into the archive — messages, and whatever attachments came with them — so the original is no
+		longer needed afterwards. Anything already in the archive is skipped, so importing twice is
+		safe.
 	</p>
 
 	{#if database}
@@ -89,8 +92,11 @@
 	{/if}
 
 	<div class="picker">
-		<button onclick={pick} disabled={picking || running}>
-			{picking ? 'Opening…' : 'Choose a folder…'}
+		<button onclick={() => pick('folder')} disabled={picking || running}>
+			{picking === 'folder' ? 'Opening…' : 'Choose a folder…'}
+		</button>
+		<button onclick={() => pick('file')} disabled={picking || running}>
+			{picking === 'file' ? 'Opening…' : 'Choose a .dht file…'}
 		</button>
 		<input
 			type="text"
@@ -128,7 +134,7 @@
 
 	{#if results.length}
 		<h2>Result</h2>
-		{#each results as result (result.kind)}
+		{#each results as result (result.path ?? result.kind)}
 			<div class="card result">
 				<strong>{result.label}</strong>
 				<ul>
@@ -145,6 +151,13 @@
 						{formatCount(result.stats.dup_media)} already stored,
 						{formatCount(result.stats.missing_media)} missing
 					</li>
+					{#if result.stats.skipped_notices}
+						<li>
+							Ignored: {formatCount(result.stats.skipped_notices)} reaction notices
+							("Reacted 👍 to your message"), which the viewer shows on the message
+							they belong to
+						</li>
+					{/if}
 				</ul>
 			</div>
 		{/each}
@@ -239,6 +252,10 @@
 		color: var(--muted);
 		margin: 0 0 18px;
 		max-width: 62ch;
+	}
+
+	.lead .inline {
+		color: var(--text);
 	}
 
 	.picker {

@@ -34,13 +34,18 @@ SETTINGS_FILE = APP_DIR / "settings.local.json"
 DEFAULT_DB = ARCHIVES_DIR / "discord_archive_custom.sqlite"
 DEFAULT_VAULT = Path(r"D:\4 Archives\chat_media_vault")
 
+# The Czech dictionary: three source files in the repository, compiled once
+# into a lookup database beside the archive by `py -m archive czech-dict`.
+# The compiled file is derived data and stays out of version control.
+CZECH_DATA = PROJECT_ROOT / "data" / "czech"
+DEFAULT_LEXICON = ARCHIVES_DIR / "czech_lemmas.sqlite"
+
 # Pre-existing Discord attachment downloads, folded into the vault on migrate.
 LEGACY_DISCORD_MEDIA = [
     Path(r"D:\4 Archives\discord_image_archive"),
     ARCHIVES_DIR / "images",
 ]
 
-PEOPLE_YAML = APP_DIR / "people.yaml"
 WEB_BUILD = APP_DIR / "web" / "build"
 
 HOST = os.environ.get("ARCHIVE_HOST", "127.0.0.1")
@@ -51,6 +56,8 @@ PLATFORMS = ("discord", "facebook", "instagram")
 # Filled in by _resolve() below. DB_PATH is None when nothing is connected yet.
 DB_PATH: Path | None = None
 VAULT_DIR: Path = DEFAULT_VAULT
+# None until the dictionary is built; search then just stops widening.
+LEXICON_PATH: Path | None = None
 
 
 class NoDatabase(RuntimeError):
@@ -74,8 +81,8 @@ def default_vault_for(db_path: Path) -> Path:
 
 
 def _resolve() -> None:
-    """Recompute DB_PATH and VAULT_DIR from the environment and settings."""
-    global DB_PATH, VAULT_DIR
+    """Recompute DB_PATH, VAULT_DIR and LEXICON_PATH from env and settings."""
+    global DB_PATH, VAULT_DIR, LEXICON_PATH
     settings = load_settings()
 
     env_db = os.environ.get("ARCHIVE_DB")
@@ -99,6 +106,9 @@ def _resolve() -> None:
         VAULT_DIR = default_vault_for(DB_PATH)
     else:
         VAULT_DIR = DEFAULT_VAULT
+
+    env_lexicon = os.environ.get("ARCHIVE_LEXICON")
+    LEXICON_PATH = Path(env_lexicon) if env_lexicon else DEFAULT_LEXICON
 
 
 _resolve()

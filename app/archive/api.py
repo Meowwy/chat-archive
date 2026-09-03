@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, db, migrate as migrate_mod, picker, vault
+from . import config, czech, db, migrate as migrate_mod, picker, query as query_mod, vault
 from .ingest.detect import detect as detect_exports
 from .ingest import people as people_mod
 from .ingest import runner
@@ -89,6 +89,49 @@ def rows(sql: str, params: tuple = ()) -> list[dict]:
 
 
 # ---------------------------------------------------------------- threads
+#
+# One person often turns up as several conversations - a Discord DM and an
+# Instagram chat with the same human. A thread is filed under a person when it
+# has exactly one counterpart and that counterpart is mapped on the People
+# page; group chats have several counterparts, so they always stand alone.
+
+_MEMBER_SQL = """
+    SELECT u.id, COALESCE(p.display, u.display_name, u.name) AS name,
+           u.avatar_sha256, u.person_id, p.display AS person,
+           COALESCE(p.is_self, 0) AS is_self
+    FROM users u
+    LEFT JOIN people p ON p.person_id = u.person_id
+    WHERE u.id IN (SELECT user_id FROM channel_participants WHERE channel_id = ?)
+       OR u.id IN (SELECT DISTINCT sender_id FROM messages WHERE channel_id = ?)
+"""
+
+
+def _members(thread_id: int, *, counts: bool = False) -> list[dict]:
+    """Everyone who joined or spoke in a thread.
+
+    Message counts cost a scan of the thread, so they are opt-in: the
+    conversation list asks for hundreds of threads and does not need them.
+    """
+    if counts:
+        found = rows(
+            _MEMBER_SQL.replace(
+                "COALESCE(p.is_self, 0) AS is_self",
+                "COALESCE(p.is_self, 0) AS is_self,"
+                " (SELECT COUNT(*) FROM messages"
+                "   WHERE sender_id = u.id AND channel_id = ?) AS messages",
+            ),
+            (thread_id, thread_id, thread_id),
+        )
+        return sorted(found, key=lambda m: -m["messages"])
+    return sorted(rows(_MEMBER_SQL, (thread_id, thread_id)), key=lambda m: m["name"])
+
+
+def _counterpart(members: list[dict]) -> int | None:
+    """The person on the other side, when there is exactly one of them."""
+    others = [m for m in members if not m["is_self"]]
+    if len(others) != 1:
+        return None
+    return others[0]["person_id"]
 
 
 @app.get("/api/threads")
@@ -107,7 +150,9 @@ def list_threads(platform: str | None = None, q: str | None = None) -> list[dict
         SELECT c.id, c.platform, c.name, c.avatar_sha256, s.type AS kind,
                COUNT(m.message_id) AS messages,
                MIN(m.timestamp)    AS first_ts,
-               MAX(m.timestamp)    AS last_ts
+               MAX(m.timestamp)    AS last_ts,
+               (SELECT text FROM messages
+                 WHERE channel_id = c.id ORDER BY timestamp DESC LIMIT 1) AS preview
         FROM channels c
         LEFT JOIN servers  s ON s.id = c.server
         LEFT JOIN messages m ON m.channel_id = c.id
@@ -120,26 +165,59 @@ def list_threads(platform: str | None = None, q: str | None = None) -> list[dict
     )
 
     for thread in threads:
-        thread["participants"] = [
-            r["name"]
-            for r in rows(
-                """
-                SELECT DISTINCT COALESCE(pp.display, u.display_name, u.name) AS name
-                FROM users u
-                LEFT JOIN people pp ON pp.person_id = u.person_id
-                WHERE u.id IN (SELECT user_id FROM channel_participants WHERE channel_id = ?)
-                   OR u.id IN (SELECT DISTINCT sender_id FROM messages WHERE channel_id = ?)
-                ORDER BY name
-                """,
-                (thread["id"], thread["id"]),
-            )
-        ]
-        last = rows(
-            "SELECT text FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT 1",
-            (thread["id"],),
+        members = _members(thread["id"])
+        person_id = _counterpart(members)
+        thread["participants"] = [m["name"] for m in members]
+        thread["person_id"] = person_id
+        thread["person"] = next(
+            (m["person"] for m in members if m["person_id"] == person_id), None
         )
-        thread["preview"] = (last[0]["text"] if last else "")[:160]
+        thread["preview"] = (thread["preview"] or "")[:160]
     return threads
+
+
+def _person_threads(person_id: int) -> list[int]:
+    """Every thread whose single counterpart is this person, busiest first."""
+    candidates = rows(
+        """
+        SELECT DISTINCT channel_id FROM (
+            SELECT channel_id FROM channel_participants
+             WHERE user_id IN (SELECT id FROM users WHERE person_id = ?)
+            UNION
+            SELECT DISTINCT channel_id FROM messages
+             WHERE sender_id IN (SELECT id FROM users WHERE person_id = ?)
+        )
+        """,
+        (person_id, person_id),
+    )
+    return [
+        row["channel_id"]
+        for row in candidates
+        if _counterpart(_members(row["channel_id"])) == person_id
+    ]
+
+
+def _thread_card(thread_id: int) -> dict | None:
+    """The heading facts about a thread, for the chat switcher in the sidebar."""
+    found = rows(
+        """
+        SELECT c.id, c.platform, c.name, c.avatar_sha256, s.type AS kind,
+               COUNT(m.message_id) AS messages,
+               MIN(m.timestamp)    AS first_ts,
+               MAX(m.timestamp)    AS last_ts
+        FROM channels c
+        LEFT JOIN servers  s ON s.id = c.server
+        LEFT JOIN messages m ON m.channel_id = c.id
+        WHERE c.id = ?
+        GROUP BY c.id
+        """,
+        (thread_id,),
+    )
+    if not found or not found[0]["messages"]:
+        return None
+    card = found[0]
+    card["participants"] = _members(thread_id, counts=True)
+    return card
 
 
 @app.get("/api/threads/{thread_id}")
@@ -155,29 +233,45 @@ def thread_detail(thread_id: int) -> dict:
     if not found:
         raise HTTPException(404, "thread not found")
     thread = found[0]
-    thread["participants"] = rows(
-        """
-        SELECT u.id, COALESCE(p.display, u.display_name, u.name) AS name,
-               u.avatar_sha256, u.person_id, p.display AS person, p.is_self,
-               (SELECT COUNT(*) FROM messages WHERE sender_id = u.id AND channel_id = ?) AS messages
-        FROM users u
-        LEFT JOIN people p ON p.person_id = u.person_id
-        WHERE u.id IN (SELECT user_id FROM channel_participants WHERE channel_id = ?)
-           OR u.id IN (SELECT DISTINCT sender_id FROM messages WHERE channel_id = ?)
-        ORDER BY messages DESC
-        """,
-        (thread_id, thread_id, thread_id),
-    )
+    members = _members(thread_id, counts=True)
+    thread["participants"] = members
+
+    # Sibling chats with the same person, so the viewer can show them side by
+    # side. A thread with no mapped counterpart is a group of one.
+    person_id = _counterpart(members)
+    sibling_ids = _person_threads(person_id) if person_id is not None else []
+    if thread_id not in sibling_ids:
+        sibling_ids.append(thread_id)
+    siblings = [card for card in map(_thread_card, sibling_ids) if card]
+    siblings.sort(key=lambda card: -card["messages"])
+    thread["group"] = {
+        "person_id": person_id,
+        "person": next(
+            (m["person"] for m in members if m["person_id"] == person_id), None
+        ),
+        "threads": siblings,
+    }
+
     # Month histogram powers the date scrubber, so a 125k-message thread can be
-    # navigated without loading it.
+    # navigated without loading it. Split by author, and covering every sibling
+    # chat, so the sidebar can total whichever ones are on show.
+    slots = ",".join("?" * len(sibling_ids))
     thread["months"] = rows(
-        """
-        SELECT strftime('%Y-%m', timestamp / 1000, 'unixepoch') AS month,
-               COUNT(*) AS messages, MIN(timestamp) AS first_ts
-        FROM messages WHERE channel_id = ?
-        GROUP BY month ORDER BY month
+        f"""
+        SELECT m.channel_id,
+               strftime('%Y-%m', m.timestamp / 1000, 'unixepoch') AS month,
+               SUM(CASE WHEN COALESCE(p.is_self, 0) THEN 1 ELSE 0 END) AS mine,
+               SUM(CASE WHEN COALESCE(p.is_self, 0) THEN 0 ELSE 1 END) AS theirs,
+               COUNT(*) AS messages,
+               MIN(m.timestamp) AS first_ts
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        LEFT JOIN people p ON p.person_id = u.person_id
+        WHERE m.channel_id IN ({slots})
+        GROUP BY m.channel_id, month
+        ORDER BY month
         """,
-        (thread_id,),
+        tuple(sibling_ids),
     )
     stats = rows(
         "SELECT COUNT(*) AS messages, MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts "
@@ -319,40 +413,29 @@ def thread_messages(
 
 # ----------------------------------------------------------------- search
 
-_TOKEN_RE = re.compile(r'"[^"]*"|\S+')
-
-
-def to_fts_query(text: str) -> str:
-    """Turn free text into a safe FTS5 expression.
-
-    Users type words, not FTS syntax, so every token is quoted. A trailing *
-    is preserved as a prefix search.
-    """
-    parts = []
-    for token in _TOKEN_RE.findall(text.strip()):
-        if token.startswith('"') and token.endswith('"') and len(token) > 1:
-            inner = token[1:-1].replace('"', '""')
-            parts.append(f'"{inner}"')
-            continue
-        prefix = token.endswith("*")
-        word = token.rstrip("*").replace('"', '""')
-        if word:
-            parts.append(f'"{word}"*' if prefix else f'"{word}"')
-    return " AND ".join(parts)
-
 
 @app.get("/api/search")
 def search(
     q: str,
     platform: str | None = None,
     thread: int | None = None,
+    threads: str | None = None,
     sender: int | None = None,
     limit: int = Query(60, le=200),
     offset: int = 0,
 ) -> dict:
-    expression = to_fts_query(q)
+    try:
+        built = query_mod.build_query(q, czech.lexicon())
+    except query_mod.QueryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    expression = built.expression
+    # Every word it widened, so the UI can say what it looked for besides.
+    widened = [
+        {"word": term.word, "lemmas": list(term.lemmas), "forms": len(term.forms)}
+        for term in built.terms
+    ]
     if not expression:
-        return {"total": 0, "hits": [], "query": q}
+        return {"total": 0, "hits": [], "query": q, "terms": widened}
 
     where, params = ["messages_fts MATCH ?"], [expression]
     if platform and platform != "all":
@@ -361,6 +444,14 @@ def search(
     if thread:
         where.append("m.channel_id = ?")
         params.append(thread)
+    if threads is not None:
+        # The in-conversation search covers every chat with the same person;
+        # an explicitly empty list is a scope with nothing in it, not "all".
+        wanted = [int(part) for part in threads.split(",") if part.strip()]
+        if not wanted:
+            return {"total": 0, "hits": [], "query": q, "terms": widened}
+        where.append(f"m.channel_id IN ({','.join('?' * len(wanted))})")
+        params.extend(wanted)
     if sender:
         where.append("m.sender_id = ?")
         params.append(sender)
@@ -394,7 +485,13 @@ def search(
         )
     except sqlite3.OperationalError as exc:
         raise HTTPException(400, f"bad search: {exc}") from exc
-    return {"total": total, "hits": hits, "query": q, "expression": expression}
+    return {
+        "total": total,
+        "hits": hits,
+        "query": q,
+        "expression": expression,
+        "terms": widened,
+    }
 
 
 # ------------------------------------------------------------------ media
@@ -430,9 +527,8 @@ def media(sha256: str):
 
 # ----------------------------------------------------------------- people
 #
-# The database is authoritative and these endpoints edit it directly; every
-# mutation rewrites people.yaml afterwards so the file stays a readable mirror
-# that can still be hand-edited and re-applied.
+# The `people` table is authoritative and these endpoints edit it directly, so
+# the mapping lives in the archive file and travels with it.
 
 
 def _reset_reader() -> None:
@@ -480,11 +576,7 @@ def get_people() -> dict:
             """
         )
     ]
-    return {
-        "people": people,
-        "identities": people_mod.identities(con),
-        "yaml_path": str(config.PEOPLE_YAML),
-    }
+    return {"people": people, "identities": people_mod.identities(con)}
 
 
 @app.post("/api/people")
@@ -535,18 +627,6 @@ def link_identities(payload: dict) -> dict:
     if not user_ids:
         raise HTTPException(400, "user_ids required")
     return {"linked": _people_write(lambda con: people_mod.link(con, person_id, user_ids))}
-
-
-@app.post("/api/people/apply")
-def apply_people() -> dict:
-    """Read the YAML file back in - the other half of the round trip."""
-    con = db.connect()
-    try:
-        count, linked = people_mod.apply(con)
-    finally:
-        con.close()
-    _reset_reader()
-    return {"people": count, "linked": linked}
 
 
 # --------------------------------------------------------------- database
@@ -635,19 +715,28 @@ def db_connect(payload: dict) -> dict:
 # ----------------------------------------------------------------- ingest
 
 
-@app.post("/api/ingest/pick-folder")
-def pick_folder() -> dict:
+def _picked(ask) -> dict:
+    """Run a native dialog, then report what is importable at what it returned."""
     try:
-        path = picker.ask_directory()
+        path = ask()
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc
     if not path:
         return {"path": None, "sources": []}
     try:
-        sources = [s.summary() for s in detect_exports(path)]
+        return {"path": path, "sources": [s.summary() for s in detect_exports(path)]}
     except ValueError as exc:
         return {"path": path, "sources": [], "error": str(exc)}
-    return {"path": path, "sources": sources}
+
+
+@app.post("/api/ingest/pick-folder")
+def pick_folder() -> dict:
+    return _picked(picker.ask_directory)
+
+
+@app.post("/api/ingest/pick-dht")
+def pick_dht() -> dict:
+    return _picked(picker.ask_dht)
 
 
 @app.post("/api/ingest/inspect")

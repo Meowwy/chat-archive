@@ -31,12 +31,43 @@ Progress = Callable[[str], None]
 _AVATAR_RE = re.compile(r"/avatars/(\d+)/([0-9a-f]+)\.", re.I)
 
 
-def recover_blobs(con: sqlite3.Connection, stats: Stats, progress: Progress) -> None:
-    """Move DHT-embedded blobs into the vault and link them to their rows."""
-    rows = con.execute("SELECT normalized_url, blob FROM download_blobs").fetchall()
-    progress(f"[discord] {len(rows)} embedded blob(s) in the DHT")
+# Blobs whose bytes are still needed by something: an attachment with nothing
+# in the vault yet, or a user whose avatar has not been stored. Anything else
+# has already been recovered, and re-reading it would mean re-hashing every
+# embedded byte on every import.
+_PENDING_BLOBS = """
+WHERE EXISTS (
+        SELECT 1 FROM attachments a
+        WHERE a.normalized_url = b.normalized_url
+          AND (a.sha256 IS NULL OR a.local_path IS NULL)
+      )
+   OR EXISTS (
+        SELECT 1 FROM users u
+        WHERE u.avatar_sha256 IS NULL AND u.avatar_url IS NOT NULL
+          AND b.normalized_url LIKE '%/avatars/%/' || u.avatar_url || '.%'
+      )
+"""
 
-    for row in rows:
+
+def recover_blobs(
+    con: sqlite3.Connection,
+    stats: Stats,
+    progress: Progress,
+    *,
+    pending_only: bool = False,
+) -> None:
+    """Move DHT-embedded blobs into the vault and link them to their rows.
+
+    `pending_only` skips blobs that have already been recovered - what an import
+    wants. The full sweep also re-stores anything deleted from the vault since,
+    which is why `discord-media` asks for it.
+    """
+    where = _PENDING_BLOBS if pending_only else ""
+    count = con.execute(f"SELECT COUNT(*) FROM download_blobs b {where}").fetchone()[0]
+    progress(f"[discord] {count} embedded blob(s) to recover")
+
+    # Counted separately so the blobs themselves are read one row at a time.
+    for row in con.execute(f"SELECT b.normalized_url, b.blob FROM download_blobs b {where}"):
         url = row["normalized_url"]
         blob = row["blob"]
         stats.media_seen += 1
