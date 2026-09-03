@@ -494,6 +494,85 @@ def search(
     }
 
 
+# ------------------------------------------------------------- statistics
+#
+# The Stats tab draws one person's history as a line per month: every message
+# they exchanged, and - once a word is searched - only the messages that used
+# it, in any inflected form. Counting here rather than in the browser means the
+# chart never has to page through tens of thousands of hits to plot them.
+
+_MONTH_COLUMNS = """
+    strftime('%Y-%m', m.timestamp / 1000, 'unixepoch') AS month,
+    SUM(CASE WHEN COALESCE(p.is_self, 0) THEN 1 ELSE 0 END) AS mine,
+    SUM(CASE WHEN COALESCE(p.is_self, 0) THEN 0 ELSE 1 END) AS theirs,
+    COUNT(*) AS messages
+"""
+
+_MONTH_JOINS = """
+    JOIN users u ON u.id = m.sender_id
+    LEFT JOIN people p ON p.person_id = u.person_id
+"""
+
+
+@app.get("/api/stats/months")
+def stats_months(threads: str, q: str | None = None) -> dict:
+    """Monthly message counts over a set of chats, optionally only matching ones.
+
+    `threads` is the comma-separated scope - every chat with one person, which
+    is what the Stats list offers. Without `q` the series is the whole history;
+    with it, the same FTS expression the search page runs, counted per month.
+    """
+    try:
+        wanted = [int(part) for part in threads.split(",") if part.strip()]
+    except ValueError as exc:
+        raise HTTPException(400, "bad thread id") from exc
+    if not wanted:
+        raise HTTPException(400, "threads required")
+
+    expression, widened = "", []
+    if q and q.strip():
+        try:
+            built = query_mod.build_query(q, czech.lexicon())
+        except query_mod.QueryError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        expression = built.expression
+        widened = [
+            {"word": term.word, "lemmas": list(term.lemmas), "forms": len(term.forms)}
+            for term in built.terms
+        ]
+        # A search that reduces to nothing matched nothing, which is a real
+        # answer: a flat line, not an error.
+        if not expression:
+            return {"months": [], "total": 0, "mine": 0, "theirs": 0, "query": q, "terms": []}
+
+    slots = ",".join("?" * len(wanted))
+    if expression:
+        sql = (
+            f"SELECT {_MONTH_COLUMNS} FROM messages_fts "
+            "JOIN messages m ON m.message_id = messages_fts.rowid "
+            f"{_MONTH_JOINS} "
+            f"WHERE messages_fts MATCH ? AND m.channel_id IN ({slots})"
+        )
+        params: tuple = (expression, *wanted)
+    else:
+        sql = f"SELECT {_MONTH_COLUMNS} FROM messages m {_MONTH_JOINS} WHERE m.channel_id IN ({slots})"
+        params = tuple(wanted)
+
+    try:
+        months = rows(sql + " GROUP BY month ORDER BY month", params)
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(400, f"bad search: {exc}") from exc
+    return {
+        "months": months,
+        "total": sum(m["messages"] for m in months),
+        "mine": sum(m["mine"] for m in months),
+        "theirs": sum(m["theirs"] for m in months),
+        "query": q,
+        "expression": expression,
+        "terms": widened,
+    }
+
+
 # ------------------------------------------------------------------ media
 
 

@@ -14,6 +14,24 @@ export const formatFull = (ms) => full.format(new Date(ms));
 export const formatMonth = (key) => monthName.format(new Date(`${key}-01T00:00:00Z`));
 export const formatMonthShort = (key) => monthOnly.format(new Date(`${key}-01T00:00:00Z`));
 
+/**
+ * Every month key from `first` to `last` inclusive, gaps included.
+ *
+ * Monthly counts arrive with silent months missing, and a line drawn straight
+ * across a missing month would claim a conversation that never happened - so
+ * the chart fills the range first and plots the zeroes.
+ */
+export function monthKeys(first, last) {
+	if (!first || !last) return [];
+	const keys = [];
+	const stop = Date.parse(`${last}-01T00:00:00Z`);
+	for (let at = new Date(`${first}-01T00:00:00Z`); at.getTime() <= stop; ) {
+		keys.push(`${at.getUTCFullYear()}-${String(at.getUTCMonth() + 1).padStart(2, '0')}`);
+		at = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 1));
+	}
+	return keys;
+}
+
 // The database buckets months in UTC, so the scrubber has to jump in UTC too.
 export const monthStart = (key) => Date.parse(`${key}-01T00:00:00Z`);
 

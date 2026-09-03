@@ -69,7 +69,7 @@ To pull in new Discord messages, run the existing backup workflow in `Archives/`
 | `py -m archive discord-media` | Recover Discord attachments that exist locally |
 | `py -m archive setup` | `migrate` + `discord-media` |
 | `py -m archive people` | List every identity and the person it belongs to |
-| `py smoke_test.py` | End-to-end checks (105 assertions) |
+| `py smoke_test.py` | End-to-end checks (146 assertions) |
 
 ## How it fits together
 
@@ -205,6 +205,29 @@ The conversation view has the same search docked beside it (**Open search** in t
 It covers every chat with that person, open or not, and clicking a hit opens the chat it belongs
 to and scrolls it to the message.
 
+### Counting a word over time
+
+The **Stats** tab asks the other question about a word: not where it was said, but when. Pick
+someone from the list — grouped exactly as the conversation list groups them, so one person's
+Discord and Instagram chats are one history, busiest first — and the chart is every message
+exchanged with them, by month, over the whole timeline. Type a word into the panel beside it and
+the chart becomes the months that word was used in, widened to every inflected form through the
+same query language as above.
+
+One endpoint answers both: `GET /api/stats/months?threads=<ids>&q=<word>`. Without `q` it groups
+those chats' messages by month; with it, the FTS expression the search page would have run is
+joined onto the index and the matches are grouped the same way. Counting in SQL rather than in
+the browser is what makes it instant on a 137k-message conversation — the page never pages
+through hits to plot them, and the line can never disagree with the search results behind it,
+which `smoke_test.py` asserts outright.
+
+A month's number is how many *messages* used the word, not how many times it occurs in them —
+the same number the search page reports as its result count. Months nobody spoke in come back
+missing, so the browser fills the range before plotting: a silent month is a zero on the line
+rather than a straight segment drawn across it. The y-axis rescales to whatever is on show, so
+24 messages fill the height as readily as 4,692, and **Split by author** breaks the line into the
+same blue and pink halves the conversation timeline uses.
+
 ### Reactions are not messages
 
 Instagram writes a reaction into the thread twice: once on the message it belongs to, and once as
@@ -277,8 +300,9 @@ npm run dev      # Vite on :5173, proxying /api to the Python server on :8765
 npm run build    # writes app/web/build, which `py -m archive serve` then serves
 ```
 
-Stack: FastAPI + SQLite (stdlib `sqlite3`, no ORM) and SvelteKit 5 with `adapter-static`. No CDN
-dependencies — it works with the machine offline.
+Stack: FastAPI + SQLite (stdlib `sqlite3`, no ORM) and SvelteKit 5 with `adapter-static`, plus
+Chart.js for the Stats lines. No CDN dependencies — everything is bundled into the build, and it
+works with the machine offline.
 
 ## Backups
 

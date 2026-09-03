@@ -15,6 +15,9 @@ timeline, whoever you were talking to and wherever you were talking to them.
   Combine words with `OR`, `-` and brackets.
 - **One person, many accounts.** Link someone's Discord, Facebook and Instagram identities and
   give them a name; that name is what the whole app shows.
+- **Words over time.** Pick a person and see every message they exchanged as a line, month by
+  month. Type a word and the line becomes the months they used it — in every form, the same
+  search, counted instead of listed.
 - **Nothing leaves the machine.** No cloud, no CDN, no telemetry. The archive is a file you own,
   and it is never part of this repository.
 
@@ -85,8 +88,9 @@ vault, so you can delete the export folder.
 
 ## Then
 
-Browse conversations, jump around 100k-message threads by month, search everything at once, and
-use the **People** page to tie one person's accounts together under a name of your choosing.
+Browse conversations, jump around 100k-message threads by month, search everything at once, use
+the **People** page to tie one person's accounts together under a name of your choosing, and open
+**Stats** to see how much — and how often a particular word — was said over the years.
 
 Full write-up of the schema, the deduplication, the encoding repair and everything else:
 **[DOCUMENTATION.md](DOCUMENTATION.md)**.

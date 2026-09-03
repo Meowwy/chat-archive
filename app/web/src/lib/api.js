@@ -50,6 +50,7 @@ export const api = {
 	thread: (id) => get(`/threads/${id}`),
 	messages: (id, params) => get(`/threads/${id}/messages`, params),
 	search: (params) => get('/search', params),
+	monthStats: (params) => get('/stats/months', params),
 	people: () => get('/people'),
 	createPerson: (body) => post('/people', body),
 	updatePerson: (personId, body) => send('PATCH', `/people/${personId}`, body),

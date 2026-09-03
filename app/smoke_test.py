@@ -315,6 +315,49 @@ check(
     hit["message_id"] in {m["message_id"] for m in context.json()["messages"]},
 )
 
+# ------------------------------------------------------- monthly statistics
+section("monthly statistics")
+
+scope = ",".join(t["id"] for t in detail["group"]["threads"]) or biggest["id"]
+timeline = client.get("/api/stats/months", params={"threads": scope}).json()
+check("GET /api/stats/months", len(timeline["months"]) > 0, f"{len(timeline['months'])} months")
+check(
+    "monthly totals split by author",
+    all(m["mine"] + m["theirs"] == m["messages"] for m in timeline["months"]),
+)
+check("months come back in order",
+      [m["month"] for m in timeline["months"]] == sorted(m["month"] for m in timeline["months"]))
+check(
+    "the timeline totals the thread group",
+    timeline["total"] == sum(
+        int(t["messages"]) for t in threads if t["id"] in scope.split(",")
+    ),
+    f"{timeline['total']} messages",
+)
+
+counted = client.get("/api/stats/months", params={"threads": scope, "q": "hospoda"}).json()
+scoped_hits = client.get("/api/search", params={"q": "hospoda", "threads": scope}).json()
+check(
+    "counting a word agrees with searching for it",
+    counted["total"] == scoped_hits["total"],
+    f"{counted['total']} counted vs {scoped_hits['total']} found",
+)
+check("a counted word is widened like a search",
+      counted["terms"] and counted["terms"][0]["forms"] > 1)
+check("a word never outnumbers the messages carrying it", counted["total"] <= timeline["total"])
+check(
+    "counted months are a subset of the whole history",
+    {m["month"] for m in counted["months"]} <= {m["month"] for m in timeline["months"]},
+)
+check("a word nobody said is an empty timeline",
+      client.get("/api/stats/months", params={"threads": scope, "q": "zzzqx"}).json()["total"] == 0)
+check("a broken query is refused politely",
+      client.get("/api/stats/months", params={"threads": scope, "q": "("}).status_code == 400)
+check("an unparseable scope is refused politely",
+      client.get("/api/stats/months", params={"threads": "nonsense"}).status_code == 400)
+check("an empty scope is refused politely",
+      client.get("/api/stats/months", params={"threads": ""}).status_code == 400)
+
 section("reaction notices and search normalisation")
 notices = [
     row["text"]

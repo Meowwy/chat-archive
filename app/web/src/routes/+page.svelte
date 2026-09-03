@@ -1,5 +1,6 @@
 <script>
 	import { api, mediaUrl } from '$lib/api.js';
+	import { filterEntries, groupThreads } from '$lib/groups.js';
 	import { formatCount, platformColor, platformLabel, relativeDay } from '$lib/format.js';
 
 	let threads = $state([]);
@@ -32,62 +33,8 @@
 		api.stats().then((data) => (stats = data));
 	});
 
-	// One row per person, not per chat: somebody you talk to on both Discord and
-	// Instagram is one entry under the name you gave them. Anything without a
-	// single mapped counterpart - group chats, unmapped identities - stays as
-	// its own row.
-	let entries = $derived.by(() => {
-		const people = new Map();
-		const output = [];
-		for (const thread of threads) {
-			if (thread.person_id == null) {
-				output.push({
-					key: `t${thread.id}`,
-					name: thread.name,
-					href: `/t/${thread.id}`,
-					threads: [thread],
-					messages: thread.messages,
-					last_ts: thread.last_ts,
-					newest: thread,
-					group: thread.kind === 'GROUP' ? thread.participants.length : 0
-				});
-				continue;
-			}
-			let entry = people.get(thread.person_id);
-			if (!entry) {
-				entry = {
-					key: `p${thread.person_id}`,
-					name: thread.person,
-					href: `/t/${thread.id}`,
-					threads: [],
-					messages: 0,
-					last_ts: 0,
-					newest: thread,
-					group: 0
-				};
-				people.set(thread.person_id, entry);
-				output.push(entry);
-			}
-			entry.threads.push(thread);
-			entry.messages += thread.messages;
-			if (thread.last_ts > entry.last_ts) {
-				entry.last_ts = thread.last_ts;
-				entry.newest = thread;
-				entry.href = `/t/${thread.id}`;
-			}
-		}
-		return output.sort((a, b) => b.last_ts - a.last_ts);
-	});
-
-	let visible = $derived.by(() => {
-		const needle = query.trim().toLowerCase();
-		if (!needle) return entries;
-		return entries.filter(
-			(entry) =>
-				entry.name.toLowerCase().includes(needle) ||
-				entry.threads.some((t) => t.name.toLowerCase().includes(needle))
-		);
-	});
+	let entries = $derived(groupThreads(threads));
+	let visible = $derived(filterEntries(entries, query));
 </script>
 
 <div class="wrap">

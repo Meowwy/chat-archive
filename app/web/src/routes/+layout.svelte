@@ -8,6 +8,7 @@
 	const links = [
 		{ href: '/', label: 'Conversations' },
 		{ href: '/search', label: 'Search' },
+		{ href: '/stats', label: 'Stats' },
 		{ href: '/people', label: 'People' },
 		{ href: '/ingest', label: 'Import' }
 	];
