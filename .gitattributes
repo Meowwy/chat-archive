@@ -1,0 +1,5 @@
+# The Czech dictionary is three parallel files: line N of words.txt, the Nth
+# u24 in word-lemma.u24. A CRLF checkout would append \r to all 3.48M words and
+# every lookup past the first would miss, so keep them byte-for-byte as committed.
+data/czech/*.txt   -text
+data/czech/*.u24   binary
