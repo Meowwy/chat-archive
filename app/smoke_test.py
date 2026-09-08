@@ -25,7 +25,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from archive import config, db, picker  # noqa: E402
 from archive.api import app  # noqa: E402
-from archive.ids import demojibake, message_source_key, synth_id  # noqa: E402
+from archive.ids import demojibake, media_type, message_source_key, synth_id  # noqa: E402
+from archive.ingest import secure  # noqa: E402
 from archive.ingest.detect import detect  # noqa: E402
 from archive.ingest.runner import ingest_path  # noqa: E402
 from archive.noise import is_reaction_notice  # noqa: E402
@@ -126,6 +127,60 @@ check(
     "source keys separate identical text at different times",
     message_source_key("instagram", "t", {"sender_name": "A", "timestamp_ms": 1, "content": "x"})
     != message_source_key("instagram", "t", {"sender_name": "A", "timestamp_ms": 2, "content": "x"}),
+)
+
+check(
+    "media types do not depend on the machine's registry",
+    (media_type("a.webp"), media_type("a.jpeg"), media_type("a.mp4"))
+    == ("image/webp", "image/jpeg", "video/mp4"),
+)
+
+# ------------------------------------------------- messenger encrypted chats
+section("Messenger encrypted-chat export")
+SECURE_THREAD = {
+    "participants": ["Me", "Jana Nováková"],
+    "threadName": "Jana Nováková_7",
+    "messages": [
+        {"isUnsent": False, "media": [], "reactions": [{"actor": "Me", "reaction": "❤"}],
+         "senderName": "Jana Nováková", "text": "ahoj", "timestamp": 1700000000000, "type": "text"},
+        {"isUnsent": False, "media": [{"uri": "./media/a.webp"}], "reactions": [],
+         "senderName": "Me", "text": "", "timestamp": 1700000000001, "type": "media"},
+        {"isUnsent": True, "media": [], "reactions": [], "senderName": "Me",
+         "text": "User unsent a message", "timestamp": 1700000000002, "type": "placeholder"},
+    ],
+}
+normalized = secure.normalize_thread(SECURE_THREAD, "Jana Nováková_7")
+check("the index suffix is dropped from the title", normalized["title"] == "Jana Nováková")
+check("thread_path is unique per file", normalized["thread_path"] == "secure/Jana Nováková_7")
+check("participants become Meta-shaped", normalized["participants"] == [{"name": "Me"}, {"name": "Jana Nováková"}])
+check("text, sender and timestamp are renamed",
+      (normalized["messages"][0]["content"], normalized["messages"][0]["sender_name"],
+       normalized["messages"][0]["timestamp_ms"]) == ("ahoj", "Jana Nováková", 1700000000000))
+check("reactions pass through unchanged", normalized["messages"][0]["reactions"] == [{"actor": "Me", "reaction": "❤"}])
+check("media lands in the bucket its type implies", normalized["messages"][1]["photos"] == [{"uri": "./media/a.webp"}])
+check("an unsent message carries no content",
+      normalized["messages"][2].get("is_unsent") is True and "content" not in normalized["messages"][2])
+check("the shape is recognised", secure.looks_like_thread(SECURE_THREAD))
+check("a DYI settings file is not", not secure.looks_like_thread({"media": [], "label_values": []}))
+
+secure_dir = config.PROJECT_ROOT / "messages"
+if secure_dir.is_dir():
+    found = [s for s in detect(secure_dir) if getattr(s, "layout", None) == "secure"]
+    check("the messages folder is detected", len(found) == 1)
+    if found:
+        source = found[0]
+        check("it is ingested as facebook", source.platform == "facebook", source.kind)
+        check("media resolves beside it, not inside it", source.media_root == secure_dir.parent)
+        check("encrypted chats reached the archive",
+              con.execute("SELECT COUNT(*) FROM channels WHERE topic LIKE 'secure/%'").fetchone()[0] > 0)
+        check("they carry the facebook platform tag",
+              con.execute("""SELECT COUNT(*) FROM messages m JOIN channels c ON c.id = m.channel_id
+                             WHERE c.topic LIKE 'secure/%' AND m.platform <> 'facebook'""").fetchone()[0] == 0)
+
+check(
+    "a DYI export's own messages folder is not mistaken for one",
+    not [s for s in detect(config.PROJECT_ROOT / "your_facebook_activity")
+         if getattr(s, "layout", None) == "secure"],
 )
 
 # --------------------------------------------------------------------- api
@@ -412,7 +467,9 @@ check("someone is marked as self", any(p["is_self"] for p in people["people"]))
 check("GET /api/ingest/history", "ingest" in client.get("/api/ingest/history").json())
 
 inspect = client.post("/api/ingest/inspect", json={"path": str(config.PROJECT_ROOT)}).json()
-check("POST /api/ingest/inspect finds both exports", len(inspect["sources"]) == 2,
+check("POST /api/ingest/inspect finds every export in the root",
+      {s["label"] for s in inspect["sources"]}
+      == {"Facebook", "Instagram", "Messenger (encrypted chats)"},
       str([s["label"] for s in inspect["sources"]]))
 check(
     "inspect reports a useful error for a non-export folder",
@@ -688,7 +745,7 @@ before_counts = (
     len(list(config.VAULT_DIR.rglob("*"))) if config.VAULT_DIR.is_dir() else 0,
 )
 
-for folder in ("your_instagram_activity", "your_facebook_activity"):
+for folder in ("your_instagram_activity", "your_facebook_activity", "messages"):
     path = config.PROJECT_ROOT / folder
     if not path.is_dir():
         continue
@@ -696,7 +753,10 @@ for folder in ("your_instagram_activity", "your_facebook_activity"):
         check(f"re-ingest {kind}: no new messages", stats_row.new_msgs == 0,
               f"{stats_row.dup_msgs} duplicates skipped")
         check(f"re-ingest {kind}: no new media", stats_row.new_media == 0)
-        check(f"re-ingest {kind}: nothing missing", stats_row.missing_media == 0)
+        if kind != "messenger":
+            # Meta writes the literal "Failed to download media" in place of a
+            # URI for media it could not export; those stay unresolvable.
+            check(f"re-ingest {kind}: nothing missing", stats_row.missing_media == 0)
         if kind == "instagram":
             check(
                 "re-ingest drops Instagram's reaction notices",

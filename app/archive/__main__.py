@@ -5,6 +5,7 @@
     py -m archive migrate               apply schema changes only
     py -m archive clean                 drop Instagram's reaction pseudo-messages
     py -m archive ingest <path>         import a Meta export folder or a .dht file
+                                        (Messenger encrypted chats: pick their `messages` folder)
     py -m archive discord-media         recover DHT-embedded blobs and downloads
     py -m archive people            list every identity and who it belongs to
     py -m archive stats                 what is in the archive right now

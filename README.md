@@ -45,16 +45,40 @@ you already have one, point the app at that file instead. The choice is remember
 
 ## Getting your exports
 
-### Facebook Messenger
+Messenger needs **two** downloads, and they are not interchangeable. Facebook's own export
+carries group and community chats; your private one-to-one chats are encrypted end to end, so Meta
+cannot read them and cannot put them in that file. They come from Messenger separately. Do both.
+
+### Facebook
 
 Go to [facebook.com](https://facebook.com) → click your profile picture → **Settings & privacy**
 → **Settings** → **Accounts Center** in the left sidebar → **Your information and permissions** →
 **Export your information** → **Create export** → select **Messages** only, and export.
 
+What arrives is group and community chats — the ones encryption does not cover. For everything
+else, keep going.
+
+### Messenger end-to-end encrypted chats
+
+Go to [messenger.com](https://www.messenger.com) → click your profile at the **bottom left** →
+**Privacy & safety** → **End-to-end encrypted chats** → **Message storage** → **Download message
+storage data** → set it up and download. Straight there:
+[messenger.com/secure_storage/dyi](https://www.messenger.com/secure_storage/dyi)
+
+This one unzips to a flat `messages/` folder of one JSON per conversation, beside a `media/`
+folder. **Keep them side by side** — the JSON points at `./media/...`, so the importer needs the
+two together. Point the app at the `messages` folder, or at the folder holding both.
+
+These are still Facebook conversations, so they are imported as Facebook and merge with the export
+above: someone you know from a group chat stays one identity, not two.
+
+> This only works if message storage was turned on before the chats you want. It is what lets Meta
+> keep a copy it can hand back; without it there is nothing on their side to export.
+
 ### Instagram
 
 Go to [instagram.com](https://instagram.com) → **More** in the bottom-left menu → **Settings** →
-then exactly as for Facebook Messenger above.
+then exactly as for Facebook above.
 
 > **Choose JSON, not HTML**, and a date range of all time. The importer reads Meta's JSON format;
 > the HTML export cannot be ingested. Meta emails you a download link, usually within a few hours.
@@ -72,12 +96,13 @@ it. Re-import it whenever you have scraped more; only new messages are added.
 
 ## Importing
 
-Open the **Import** page and press **Choose a folder…** for an unzipped Facebook or Instagram
-export, or **Choose a .dht file…** for Discord. Check what was detected, and import. Or from a
+Open the **Import** page and press **Choose a folder…** for an unzipped Facebook, Instagram or
+encrypted-Messenger export, or **Choose a .dht file…** for Discord. Check what was detected, and import. Or from a
 terminal:
 
 ```
 py -m archive ingest "C:/path/to/your_instagram_activity"
+py -m archive ingest "C:/path/to/messages"          # encrypted Messenger chats
 py -m archive ingest "C:/path/to/discord_archive.dht"
 ```
 

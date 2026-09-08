@@ -1,4 +1,9 @@
-"""Facebook / Instagram JSON -> unified archive tables.
+"""Facebook / Instagram / Messenger JSON -> unified archive tables.
+
+Three exports, one adapter. Facebook's and Instagram's Download Your Information
+archives are read as they come; Messenger's encrypted-chat download says the
+same things in different words, so ingest/secure.py rewrites it into the same
+shape first and everything below is shared.
 
 Every Meta row gets a negative synthetic id (see ids.synth_id), so Discord's
 positive snowflakes and Meta's ids can never collide inside the shared tables.
@@ -12,14 +17,14 @@ export is a no-op apart from picking up newly-added reactions.
 from __future__ import annotations
 
 import json
-import mimetypes
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from .. import noise, vault
-from ..ids import demojibake, media_entries, message_source_key, synth_id
+from ..ids import demojibake, media_entries, media_type, message_source_key, synth_id
+from . import secure
 from .detect import ExportSource
 
 Progress = Callable[[str], None]
@@ -60,7 +65,7 @@ class MetaIngest:
     ):
         self.con = con
         self.source = source
-        self.platform = source.kind
+        self.platform = source.platform
         self.progress = progress or (lambda _message: None)
         self.stats = Stats()
 
@@ -127,12 +132,13 @@ class MetaIngest:
             ON CONFLICT(attachment_id) DO UPDATE SET
                 local_path = excluded.local_path,
                 sha256     = excluded.sha256,
-                size       = excluded.size
+                size       = excluded.size,
+                type       = excluded.type
             """,
             (
                 attachment_id,
                 name,
-                mimetypes.guess_type(name)[0],
+                media_type(name),
                 uri,
                 size,
                 self.platform,
@@ -145,6 +151,13 @@ class MetaIngest:
     # -- thread ----------------------------------------------------------
     def ingest_thread(self, path: Path) -> None:
         raw = json.loads(path.read_bytes())
+        if self.source.layout == "secure":
+            raw = secure.normalize_thread(raw, path.stem)
+            if not raw["messages"]:
+                # Meta ships a file for every conversation you have ever opened,
+                # empty ones included. A thread with nothing in it is invisible
+                # in the viewer anyway, so do not mint an identity for it.
+                return
         thread_path = raw.get("thread_path") or f"inbox/{path.parent.name}"
         channel_id = self._channel_id(thread_path)
         title = demojibake(raw.get("title")) or path.parent.name
@@ -314,6 +327,8 @@ class MetaIngest:
     def run(self) -> Stats:
         total = len(self.source.thread_files)
         for index, path in enumerate(self.source.thread_files, 1):
-            self.progress(f"[{self.platform}] thread {index}/{total}: {path.parent.name}")
+            self.progress(
+                f"[{self.source.kind}] thread {index}/{total}: {self.source.thread_label(path)}"
+            )
             self.ingest_thread(path)
         return self.stats

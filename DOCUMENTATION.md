@@ -62,14 +62,14 @@ To pull in new Discord messages, run the existing backup workflow in `Archives/`
 |---|---|
 | `py -m archive serve` | Run the web viewer |
 | `py -m archive db [<path>] [--create]` | Show, connect or create the archive database |
-| `py -m archive ingest <path>` | Import a Meta export folder or a Discord `.dht` file |
+| `py -m archive ingest <path>` | Import a Meta export folder, a Messenger encrypted-chat download, or a Discord `.dht` file |
 | `py -m archive stats` | What is in the archive right now |
 | `py -m archive migrate` | Apply schema changes (backs the DB up first) |
 | `py -m archive clean` | Drop Instagram's "Reacted 👍 to your message" pseudo-messages |
 | `py -m archive discord-media` | Recover Discord attachments that exist locally |
 | `py -m archive setup` | `migrate` + `discord-media` |
 | `py -m archive people` | List every identity and the person it belongs to |
-| `py smoke_test.py` | End-to-end checks (146 assertions) |
+| `py smoke_test.py` | End-to-end checks (164 assertions) |
 
 ## How it fits together
 
@@ -77,6 +77,7 @@ To pull in new Discord messages, run the existing backup workflow in `Archives/`
 discord_archive.dht                     live tracker file, read-only
 your_facebook_activity/                 export folders
 your_instagram_activity/
+messages/ + media/                      Messenger encrypted-chat download
         |
         |  the Import page, or py -m archive ingest   (append-only)
         v
@@ -89,6 +90,34 @@ chat_media_vault/                       content-addressed media
 
 Everything lives in **one** database. Facebook and Instagram messages go into the same
 `messages`, `channels` and `users` tables as Discord, distinguished by a `platform` column.
+
+### The three Meta exports, one importer
+
+Facebook's and Instagram's *Download Your Information* archives are laid out as
+`your_*_activity/messages/inbox/<thread>/message_1.json`. Messenger's encrypted-chat download is
+laid out differently — a flat `messages/` folder of one JSON per conversation, beside the `media/`
+folder its `./media/...` URIs point at — and names the same things differently:
+
+| Download Your Information | Encrypted-chat download |
+|---|---|
+| `participants: [{"name": …}]` | `participants: ["…"]` |
+| `title` / `thread_path` | `threadName` (with a `_<n>` suffix Meta adds for uniqueness) |
+| `sender_name` `timestamp_ms` `content` | `senderName` `timestamp` `text` |
+| `is_unsent` | `isUnsent`, with `text` set to a UI placeholder |
+| `photos` / `videos` / `audio_files` / `files` | `media: [{uri}]`, one flat list |
+| `reactions: [{reaction, actor}]` | identical |
+| latin-1 mojibake | clean UTF-8 |
+
+Rather than a second importer, `ingest/secure.py` rewrites a conversation into the first shape and
+`MetaIngest` does the rest unchanged. Encrypted chats are Facebook Messenger conversations, so
+they are stored as `platform = "facebook"`: a counterpart already known from a group chat resolves
+to the *same* `users` row, and any people link they already have carries over.
+
+Two things Meta's own export does that are worth knowing. It ships a file for every conversation
+you have ever opened, empty ones included — those are skipped rather than turned into a thread and
+an identity with nothing behind them. And where it could not retrieve an attachment it writes the
+literal string `"Failed to download media"` in place of the URI; that is kept, and shows up as an
+unavailable attachment, because the message really did carry one.
 
 ### Why Meta ids are negative
 
@@ -107,6 +136,11 @@ Identity is therefore derived from the message itself:
 ```
 source_key = platform | thread_path | sender | timestamp_ms | sha1(text + media uris + link)
 ```
+
+Media URIs are part of that key, and the encrypted-chat download names its files with a fresh UUID
+every time you request one. Re-importing the *same* folder is a no-op, but a newly requested
+download re-imports media-only messages as new rows. The vault still stores each file's bytes
+once, addressed by their sha256.
 
 Verified unique across every message in the exports it was built against (6,792 of them), with
 zero collisions. The message id is a hash of that key, so the primary key does the deduplication and re-importing an

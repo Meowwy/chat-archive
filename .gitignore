@@ -14,6 +14,10 @@ your_facebook_activity/
 your_instagram_activity/
 *_activity/
 
+# Messenger's encrypted-chat download unzips to these two, side by side
+/messages/
+/media/
+
 # Which database this machine is connected to
 app/settings.local.json
 

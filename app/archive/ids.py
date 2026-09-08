@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
+from pathlib import PurePosixPath
 from typing import Any, Iterable
 
 _SEP = "\x1f"
@@ -50,6 +52,25 @@ def fix_deep(obj: Any) -> Any:
 
 
 _MEDIA_KEYS = ("photos", "videos", "audio_files", "files", "gifs")
+
+# mimetypes reads the Windows registry, so it answers differently on different
+# machines - .webp is unknown on some of them. That decides whether the viewer
+# renders an image, and for the Messenger export it also decides which bucket a
+# file lands in, which feeds the message source_key. Pin what Meta ships.
+_MEDIA_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".heic": "image/heic",
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+    ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
+    ".wav": "audio/wav", ".opus": "audio/opus",
+    ".pdf": "application/pdf",
+}
+
+
+def media_type(name: str) -> str | None:
+    """MIME type for a media filename - the same answer on every machine."""
+    suffix = PurePosixPath(name).suffix.lower()
+    return _MEDIA_TYPES.get(suffix) or mimetypes.guess_type(name)[0]
 
 
 def message_source_key(platform: str, thread_path: str, message: dict) -> str:

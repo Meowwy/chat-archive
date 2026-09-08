@@ -1,15 +1,19 @@
 """Work out what the user picked actually contains.
 
-Two kinds of source are understood:
+Three kinds of source are understood:
 
 - a Meta export folder - the extracted download root, a `your_*_activity`
   folder, its `messages/` subfolder, or `messages/inbox/` itself;
+- a Messenger encrypted-chat download - the flat `messages/` folder of one JSON
+  per conversation that Meta's "secure storage" export unzips to, beside the
+  `media/` folder its URIs point at (see ingest/secure.py);
 - a Discord History Tracker `.dht` file, either picked directly or found in a
   folder that was picked.
 
-Media URIs inside the Meta JSON are written relative to the *parent* of the
-`your_*_activity` folder (e.g. "your_instagram_activity/messages/inbox/x/photos/1.jpg"),
-so locating that marker folder is what lets us resolve attachments.
+Media URIs are written relative to the *parent* of the folder we anchor on -
+"your_instagram_activity/messages/inbox/x/photos/1.jpg" beside
+`your_instagram_activity`, "./media/<uuid>.jpeg" beside `messages` - so locating
+that folder is what lets us resolve attachments in either layout.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import config, db
+from . import secure
 
 MARKERS = {
     "your_facebook_activity": "facebook",
@@ -31,17 +36,32 @@ MARKERS = {
 DHT_TABLES = {"messages", "channels", "users", "attachments"}
 DB_SUFFIXES = {".dht", ".sqlite", ".sqlite3", ".db"}
 
+# What an encrypted-chat download calls its conversation folder. A DYI export
+# has a folder of the same name, so the two are told apart by content.
+SECURE_DIR = "messages"
+
 
 @dataclass
 class ExportSource:
     kind: str
     marker_dir: Path
     thread_files: list[Path] = field(default_factory=list)
+    layout: str = "dyi"
 
     @property
     def path(self) -> Path:
         """What the user picked, as the ingest log records it."""
         return self.marker_dir
+
+    @property
+    def platform(self) -> str:
+        """Whose namespace these rows join.
+
+        An encrypted-chat download holds Facebook Messenger conversations, so it
+        shares `facebook`'s threads, users and people links rather than forking a
+        fourth platform the rest of the app would have to learn about.
+        """
+        return "facebook" if self.kind == "messenger" else self.kind
 
     @property
     def media_root(self) -> Path:
@@ -50,7 +70,15 @@ class ExportSource:
 
     @property
     def label(self) -> str:
-        return {"facebook": "Facebook", "instagram": "Instagram"}.get(self.kind, self.kind)
+        return {
+            "facebook": "Facebook",
+            "instagram": "Instagram",
+            "messenger": "Messenger (encrypted chats)",
+        }.get(self.kind, self.kind)
+
+    def thread_label(self, path: Path) -> str:
+        """How one thread file is named in progress output."""
+        return path.stem if self.layout == "secure" else path.parent.name
 
     def summary(self) -> dict:
         threads = len(self.thread_files)
@@ -131,6 +159,39 @@ def _thread_files(marker: Path) -> list[Path]:
     return sorted(inbox.glob("*/message_*.json"))
 
 
+def _secure_thread_files(folder: Path) -> list[Path]:
+    """The conversation files in an encrypted-chat download, if this is one.
+
+    Judged by content, never by name: a DYI export's `messages/` folder is full
+    of settings JSON that must not be mistaken for conversations.
+    """
+    if not folder.is_dir() or folder.name != SECURE_DIR or folder.parent.name in MARKERS:
+        return []
+    files = []
+    for candidate in sorted(folder.glob("*.json")):
+        try:
+            if secure.looks_like_thread(json.loads(candidate.read_bytes())):
+                files.append(candidate)
+        except (OSError, ValueError):
+            continue
+    return files
+
+
+def _find_secure(path: Path) -> list[Path]:
+    """Folders at, or just below, `path` that could be an encrypted-chat download."""
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in [path, path / SECURE_DIR, *sorted(path.glob(f"*/{SECURE_DIR}"))]:
+        if not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        found.append(candidate)
+    return found
+
+
 def _find_markers(path: Path) -> list[Path]:
     """Locate `your_*_activity` folders at, above, or just below `path`."""
     found: list[Path] = []
@@ -171,7 +232,7 @@ def detect(path: str | Path) -> list[ExportSource | DhtSource]:
         raise ValueError(
             f"{path.name} is not a Discord History Tracker file.\n"
             "Pick the .dht file the tracker writes, or a folder holding a "
-            "Facebook or Instagram export."
+            "Facebook, Instagram or Messenger export."
         )
 
     if not path.is_dir():
@@ -182,6 +243,14 @@ def detect(path: str | Path) -> list[ExportSource | DhtSource]:
         files = _thread_files(marker)
         if files:
             sources.append(ExportSource(kind=MARKERS[marker.name], marker_dir=marker, thread_files=files))
+    for folder in _find_secure(path):
+        files = _secure_thread_files(folder)
+        if files:
+            sources.append(
+                ExportSource(
+                    kind="messenger", marker_dir=folder, thread_files=files, layout="secure"
+                )
+            )
     # A folder can also simply hold tracker files - picking Archives/ works.
     sources.extend(DhtSource(path=found) for found in sorted(path.glob("*.dht")) if is_dht(found))
 
@@ -189,7 +258,8 @@ def detect(path: str | Path) -> list[ExportSource | DhtSource]:
         raise ValueError(
             f"Nothing importable found in {path}.\n"
             "Pick the folder containing 'your_facebook_activity' or "
-            "'your_instagram_activity' (or one of those folders itself), or a "
+            "'your_instagram_activity' (or one of those folders itself), the "
+            "'messages' folder from a Messenger encrypted-chat download, or a "
             "Discord History Tracker .dht file."
         )
     return sources
