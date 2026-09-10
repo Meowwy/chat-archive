@@ -7,9 +7,12 @@
     py -m archive ingest <path>         import a Meta export folder or a .dht file
                                         (Messenger encrypted chats: pick their `messages` folder)
     py -m archive discord-media         recover DHT-embedded blobs and downloads
-    py -m archive people            list every identity and who it belongs to
+    py -m archive people                list every identity and who it belongs to
     py -m archive stats                 what is in the archive right now
     py -m archive serve                 run the local web viewer
+
+Every command but `db --create` works on the archive this machine is connected
+to, which each one asks for the same way: `Archive.connected()`.
 """
 
 from __future__ import annotations
@@ -19,7 +22,8 @@ import sys
 
 from pathlib import Path
 
-from . import config, db, migrate, noise
+from . import config, migrate, noise
+from .archive import Archive
 from .ingest import people as people_mod
 from .ingest import runner
 
@@ -28,66 +32,70 @@ def _print(message: str) -> None:
     print(message, flush=True)
 
 
+def _connected() -> Archive | None:
+    """The connected archive, or None after saying how to connect one."""
+    try:
+        return Archive.connected()
+    except config.NoDatabase as exc:
+        _print(f"[db] {exc}")
+        return None
+
+
 def cmd_db(args) -> int:
     """Show, connect or create the archive this app reads."""
     if args.path:
         path = Path(args.path).expanduser()
-        if args.create:
-            migrate.create_archive(path)
-        elif not path.is_file():
-            _print(f"[db] no such database: {path}")
+        try:
+            if args.create:
+                archive = Archive.create(path)
+            else:
+                archive = Archive.open(path)
+                archive.upgrade()  # heal an older or DHT-only archive
+        except config.NoDatabase as exc:
+            _print(f"[db] {exc}")
             _print("[db] to start an empty one:  py -m archive db <path> --create")
             return 1
-        else:
-            con = db.connect(path)
-            try:
-                migrate.ensure_schema(con)  # heal an older or DHT-only archive
-            finally:
-                con.close()
-        config.connect_db(path)
-        _print(f"[db] connected: {config.DB_PATH}")
-        _print(f"[db] vault:     {config.VAULT_DIR}")
+        archive.remember()
+        _print(f"[db] connected: {archive.path}")
+        _print(f"[db] vault:     {archive.vault.root}")
         _print(f"[db] remembered in {config.SETTINGS_FILE.name}")
         return 0
 
-    if not config.is_connected():
-        _print("[db] no database connected")
+    archive = _connected()
+    if archive is None:
         _print("[db] connect one:  py -m archive db <path to .sqlite>")
         _print("[db] or start one: py -m archive db <path to .sqlite> --create")
         return 1
-    con = db.connect_ro()
-    try:
-        total = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-    finally:
-        con.close()
-    _print(f"[db] {config.DB_PATH}  ({total:,} messages)")
-    _print(f"[db] vault: {config.VAULT_DIR}")
+    _print(f"[db] {archive.path}  ({archive.summary()['messages']:,} messages)")
+    _print(f"[db] vault: {archive.vault.root}")
+    archive.close()
     return 0
 
 
 def cmd_migrate(_args) -> int:
-    migrate.migrate()
+    archive = _connected()
+    if archive is None:
+        return 1
+    migrate.migrate(archive)
     return 0
 
 
 def cmd_clean(_args) -> int:
     """Remove the 'Reacted 😂 to your message' rows Instagram exports contain."""
-    con = db.connect()
-    try:
+    archive = _connected()
+    if archive is None:
+        return 1
+    with archive.write() as con:
         migrate.ensure_schema(con)
         noise.purge_reaction_notices(con)
-    finally:
-        con.close()
     return 0
 
 
 def cmd_discord_media(_args) -> int:
-    con = db.connect()
-    try:
-        migrate.ensure_schema(con)
-        stats = runner.ingest_discord_media(con, _print)
-    finally:
-        con.close()
+    archive = _connected()
+    if archive is None:
+        return 1
+    stats = runner.ingest_discord_media(archive, _print)
     _print(
         f"[discord] vault: {stats.new_media} new, {stats.dup_media} already present, "
         f"{stats.missing_media} missing"
@@ -96,12 +104,21 @@ def cmd_discord_media(_args) -> int:
 
 
 def cmd_setup(args) -> int:
-    cmd_migrate(args)
-    return cmd_discord_media(args)
+    failed = cmd_migrate(args)
+    return failed or cmd_discord_media(args)
 
 
 def cmd_ingest(args) -> int:
-    results = runner.ingest_path(args.path, _print if args.verbose else None)
+    archive = _connected()
+    if archive is None:
+        return 1
+    try:
+        results = runner.ingest_path(archive, args.path, _print if args.verbose else None)
+    except ValueError as exc:
+        # detect() says what it looked for and what to pick instead - that is
+        # the whole message, so print it rather than tracebacking over it.
+        _print(f"[ingest] {exc}")
+        return 1
     for kind, stats in results:
         _print(
             f"[{kind}] threads {stats.threads_seen} ({stats.new_threads} new) | "
@@ -118,8 +135,10 @@ def cmd_ingest(args) -> int:
 
 def cmd_people(_args) -> int:
     """List identities; linking them is the People page's job."""
-    con = db.connect()
-    try:
+    archive = _connected()
+    if archive is None:
+        return 1
+    with archive.write() as con:
         migrate.ensure_schema(con)
         for row in people_mod.identities(con):
             mark = " " if row["person_id"] else "?"
@@ -127,41 +146,38 @@ def cmd_people(_args) -> int:
                 f"{mark} {row['platform']:<10} {row['messages']:>7,}  "
                 f"{row['display_name'] or row['name']}"
             )
-    finally:
-        con.close()
     return 0
 
 
 def cmd_stats(_args) -> int:
-    con = db.connect_ro()
-    try:
-        _print(f"database: {config.DB_PATH}")
-        _print(f"vault:    {config.VAULT_DIR}")
-        _print("")
-        _print(f"{'platform':<12}{'threads':>9}{'messages':>12}{'senders':>9}")
-        for row in con.execute(
-            """
-            SELECT m.platform,
-                   COUNT(DISTINCT m.channel_id) AS threads,
-                   COUNT(*)                     AS messages,
-                   COUNT(DISTINCT m.sender_id)  AS senders
-            FROM messages m GROUP BY m.platform ORDER BY messages DESC
-            """
-        ):
-            _print(
-                f"{row['platform']:<12}{row['threads']:>9,}{row['messages']:>12,}{row['senders']:>9,}"
-            )
-        total = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        _print(f"{'TOTAL':<12}{'':>9}{total:>12,}")
-        _print("")
-        stored, missing = con.execute(
-            """
-            SELECT SUM(sha256 IS NOT NULL), SUM(sha256 IS NULL) FROM attachments
-            """
-        ).fetchone()
-        _print(f"attachments: {stored or 0:,} in vault, {missing or 0:,} unavailable")
-    finally:
-        con.close()
+    archive = _connected()
+    if archive is None:
+        return 1
+    con = archive.read()
+    _print(f"database: {archive.path}")
+    _print(f"vault:    {archive.vault.root}")
+    _print("")
+    _print(f"{'platform':<12}{'threads':>9}{'messages':>12}{'senders':>9}")
+    for row in con.execute(
+        """
+        SELECT m.platform,
+               COUNT(DISTINCT m.channel_id) AS threads,
+               COUNT(*)                     AS messages,
+               COUNT(DISTINCT m.sender_id)  AS senders
+        FROM messages m GROUP BY m.platform ORDER BY messages DESC
+        """
+    ):
+        _print(
+            f"{row['platform']:<12}{row['threads']:>9,}{row['messages']:>12,}{row['senders']:>9,}"
+        )
+    total = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    _print(f"{'TOTAL':<12}{'':>9}{total:>12,}")
+    _print("")
+    stored, missing = con.execute(
+        "SELECT SUM(sha256 IS NOT NULL), SUM(sha256 IS NULL) FROM attachments"
+    ).fetchone()
+    _print(f"attachments: {stored or 0:,} in vault, {missing or 0:,} unavailable")
+    archive.close()
     return 0
 
 
@@ -169,7 +185,7 @@ def cmd_czech_dict(args) -> int:
     """Compile the Czech dictionary that widens a search to whole paradigms."""
     from . import czech
 
-    dest = Path(args.out) if args.out else config.DEFAULT_LEXICON
+    dest = Path(args.out) if args.out else config.lexicon_path()
     if dest.is_file() and not args.force:
         _print(f"[czech-dict] already built: {dest} (use --force to rebuild)")
         return 0
@@ -181,9 +197,11 @@ def cmd_czech_dict(args) -> int:
 def cmd_serve(args) -> int:
     import uvicorn
 
-    if config.is_connected():
-        _print(f"[serve] archive: {config.DB_PATH}")
-    else:
+    try:
+        archive = Archive.connected()
+        _print(f"[serve] archive: {archive.path}")
+        archive.close()
+    except config.NoDatabase:
         _print("[serve] no database connected - the app will ask for one")
     _print(f"[serve] http://{args.host}:{args.port}")
     uvicorn.run("archive.api:app", host=args.host, port=args.port, log_level="warning")

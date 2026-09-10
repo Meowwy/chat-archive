@@ -1,14 +1,21 @@
-"""End-to-end checks against the real archive.
+"""End-to-end checks against a throwaway archive built for the purpose.
 
-    py smoke_test.py
+    py smoke_test.py [-v]
 
-Exercises every API endpoint plus the invariants that matter: ingest is
-idempotent, ids survive the round trip, encoding is repaired, and the full-text
-index stays in step with the messages table.
+`fixture.py` writes a Facebook export, an Instagram export, a Messenger
+encrypted-chat download and a Discord History Tracker file into a temp folder,
+ingests all four, and links the identities into people. Everything below then
+runs against *that* archive: ingest is idempotent, ids survive the round trip,
+encoding is repaired, and the full-text index stays in step with the messages
+table.
 
-Read-only apart from the ingest re-runs, which by design must change nothing,
-the people-editing section, and the pluggable-database section - both of which
-put everything back as they found it.
+Nothing here touches the archive you actually use, and nothing has to be put
+back afterwards - the temp folder is deleted at the end. That is what the
+`Archive` handle buys: the app is handed an archive, and so is this file.
+
+The Czech dictionary is the one optional part. It is derived data, so a fresh
+clone may not have it; the checks that need it are skipped with a note rather
+than failing, exactly as search itself degrades.
 """
 
 from __future__ import annotations
@@ -23,25 +30,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from archive import config, db, picker  # noqa: E402
+import fixture  # noqa: E402
+from archive import api, config, czech, picker, query  # noqa: E402
 from archive.api import app  # noqa: E402
+from archive.archive import Archive  # noqa: E402
+from archive.czech import Lexicon  # noqa: E402
 from archive.ids import demojibake, media_type, message_source_key, synth_id  # noqa: E402
-from archive.ingest import secure  # noqa: E402
+from archive.ingest import runner, secure  # noqa: E402
 from archive.ingest.detect import detect  # noqa: E402
-from archive.ingest.runner import ingest_path  # noqa: E402
 from archive.noise import is_reaction_notice  # noqa: E402
-from archive import czech, query  # noqa: E402
 
 CZECH_LETTERS = "áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"
+VERBOSE = "-v" in sys.argv
 
-client = TestClient(app)
 failures: list[str] = []
+skipped: list[str] = []
 
 
 def check(label: str, condition: bool, detail: str = "") -> None:
     print(f"  {'PASS' if condition else 'FAIL'}  {label}{f' - {detail}' if detail else ''}")
     if not condition:
         failures.append(label)
+
+
+def skip(label: str, why: str) -> None:
+    print(f"  SKIP  {label} - {why}")
+    skipped.append(label)
 
 
 def section(title: str) -> None:
@@ -65,54 +79,99 @@ def db_tables(path: Path) -> list[str]:
         con.close()
 
 
+# ------------------------------------------------------------------- setup
+print("building a fixture archive...")
+fx = fixture.build(verbose=VERBOSE)
+# The "connect a database" checks remember their choice; aim that at the
+# fixture so this machine's own connection is never written to.
+fixture.isolate_settings(fx.root)
+api.use(fx.archive)
+client = TestClient(app)
+
+
+def sql(query_text: str, params: tuple = ()):
+    """Read straight from the fixture archive, re-opening if it was closed."""
+    return fx.archive.read().execute(query_text, params)
+
+
+def one(query_text: str, params: tuple = ()):
+    return sql(query_text, params).fetchone()[0]
+
+
 # ---------------------------------------------------------------- database
 section("database")
-con = db.connect_ro()
-total = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-fts = con.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
-check("full-text index covers every message", total == fts, f"{total} messages, {fts} indexed")
+total = one("SELECT COUNT(*) FROM messages")
+check("the fixture archive was built", total > 200, f"{total} messages")
+check(
+    "full-text index covers every message",
+    total == one("SELECT COUNT(*) FROM messages_fts"),
+    f"{total} messages, {one('SELECT COUNT(*) FROM messages_fts')} indexed",
+)
 
-by_platform = dict(con.execute("SELECT platform, COUNT(*) FROM messages GROUP BY platform"))
+by_platform = dict(sql("SELECT platform, COUNT(*) FROM messages GROUP BY platform"))
 check("all three platforms present", set(by_platform) == {"discord", "facebook", "instagram"},
       json.dumps(by_platform))
+check("the encrypted chats landed under facebook, not a fourth platform",
+      by_platform["facebook"] > 150, str(by_platform["facebook"]))
 
 check(
     "Meta ids are negative, Discord ids positive",
-    con.execute(
-        "SELECT COUNT(*) FROM messages WHERE (platform = 'discord') != (message_id > 0)"
-    ).fetchone()[0] == 0,
+    one("SELECT COUNT(*) FROM messages WHERE (platform = 'discord') != (message_id > 0)") == 0,
 )
-
 check(
     "no mojibake left in message text",
-    con.execute(
+    one(
         "SELECT COUNT(*) FROM messages WHERE platform <> 'discord' "
         "AND (text LIKE '%Ã%' OR text LIKE '%Å¾%' OR text LIKE '%Ä%')"
-    ).fetchone()[0] == 0,
+    ) == 0,
 )
-
+check(
+    "the repaired text is exactly what was written",
+    one("SELECT COUNT(*) FROM messages WHERE text = 'ahoj, jak se máš?'") > 0,
+)
 check(
     "every Meta message has a dedup key",
-    con.execute(
-        "SELECT COUNT(*) FROM messages WHERE platform <> 'discord' AND source_key IS NULL"
-    ).fetchone()[0] == 0,
+    one("SELECT COUNT(*) FROM messages WHERE platform <> 'discord' AND source_key IS NULL") == 0,
 )
-
-orphans = con.execute(
+check(
+    "source keys are unique",
+    one("SELECT COUNT(*) FROM (SELECT source_key FROM messages "
+        "WHERE source_key IS NOT NULL GROUP BY source_key HAVING COUNT(*) > 1)") == 0,
+)
+orphans = one(
     "SELECT COUNT(*) FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE u.id IS NULL"
-).fetchone()[0]
+)
 check("every message has a sender", orphans == 0, f"{orphans} orphans")
+check(
+    "an empty conversation is not given a thread of its own",
+    one("SELECT COUNT(*) FROM channels WHERE topic = 'secure/Nikdo_1'") == 0,
+)
+check(
+    "an unsent message is marked, not invented",
+    one("SELECT COUNT(*) FROM messages WHERE is_unsent = 1") == 1,
+)
 
 # ------------------------------------------------------------------- vault
 section("media vault")
-from archive import vault  # noqa: E402
-
-stored = con.execute(
+stored = sql(
     "SELECT sha256, local_path FROM attachments WHERE local_path IS NOT NULL"
 ).fetchall()
-missing = [row["local_path"] for row in stored if not vault.exists(row["local_path"])]
+missing = [row["local_path"] for row in stored if not fx.archive.vault.exists(row["local_path"])]
 check("every stored attachment exists on disk", not missing, f"{len(missing)} missing")
-check("vault holds files", len(stored) > 0, f"{len(stored)} attachments")
+check("the vault holds one file per platform", len(stored) == 4, f"{len(stored)} attachments")
+check(
+    "identical bytes are stored once",
+    len({row["sha256"] for row in stored}) == 1,
+    "four references, one file",
+)
+check(
+    "a file Meta could not export is kept as an unavailable attachment",
+    one("SELECT COUNT(*) FROM attachments WHERE sha256 IS NULL") == 1,
+)
+check(
+    "and the bytes in the vault are the ones that went in",
+    fx.archive.vault.abspath(stored[0]["local_path"]).read_bytes() == fixture.PIXEL,
+)
 
 # --------------------------------------------------------------------- ids
 section("id synthesis")
@@ -123,12 +182,12 @@ check(
 )
 check("demojibake repairs Meta text", demojibake('DobrÃ¡ zprÃ¡va, mÅ¯Å¾eÅ¡') == 'Dobrá zpráva, můžeš')
 check("demojibake leaves clean text alone", demojibake("už čeština") == "už čeština")
+check("the fixture writes real mojibake", fixture.mojibake("máš") == "mÃ¡Å¡")
 check(
     "source keys separate identical text at different times",
     message_source_key("instagram", "t", {"sender_name": "A", "timestamp_ms": 1, "content": "x"})
     != message_source_key("instagram", "t", {"sender_name": "A", "timestamp_ms": 2, "content": "x"}),
 )
-
 check(
     "media types do not depend on the machine's registry",
     (media_type("a.webp"), media_type("a.jpeg"), media_type("a.mp4"))
@@ -152,70 +211,73 @@ SECURE_THREAD = {
 normalized = secure.normalize_thread(SECURE_THREAD, "Jana Nováková_7")
 check("the index suffix is dropped from the title", normalized["title"] == "Jana Nováková")
 check("thread_path is unique per file", normalized["thread_path"] == "secure/Jana Nováková_7")
-check("participants become Meta-shaped", normalized["participants"] == [{"name": "Me"}, {"name": "Jana Nováková"}])
+check("participants become Meta-shaped",
+      normalized["participants"] == [{"name": "Me"}, {"name": "Jana Nováková"}])
 check("text, sender and timestamp are renamed",
       (normalized["messages"][0]["content"], normalized["messages"][0]["sender_name"],
        normalized["messages"][0]["timestamp_ms"]) == ("ahoj", "Jana Nováková", 1700000000000))
-check("reactions pass through unchanged", normalized["messages"][0]["reactions"] == [{"actor": "Me", "reaction": "❤"}])
-check("media lands in the bucket its type implies", normalized["messages"][1]["photos"] == [{"uri": "./media/a.webp"}])
+check("reactions pass through unchanged",
+      normalized["messages"][0]["reactions"] == [{"actor": "Me", "reaction": "❤"}])
+check("media lands in the bucket its type implies",
+      normalized["messages"][1]["photos"] == [{"uri": "./media/a.webp"}])
 check("an unsent message carries no content",
-      normalized["messages"][2].get("is_unsent") is True and "content" not in normalized["messages"][2])
+      normalized["messages"][2].get("is_unsent") is True
+      and "content" not in normalized["messages"][2])
 check("the shape is recognised", secure.looks_like_thread(SECURE_THREAD))
 check("a DYI settings file is not", not secure.looks_like_thread({"media": [], "label_values": []}))
 
-secure_dir = config.PROJECT_ROOT / "messages"
-if secure_dir.is_dir():
-    found = [s for s in detect(secure_dir) if getattr(s, "layout", None) == "secure"]
-    check("the messages folder is detected", len(found) == 1)
-    if found:
-        source = found[0]
-        check("it is ingested as facebook", source.platform == "facebook", source.kind)
-        check("media resolves beside it, not inside it", source.media_root == secure_dir.parent)
-        check("encrypted chats reached the archive",
-              con.execute("SELECT COUNT(*) FROM channels WHERE topic LIKE 'secure/%'").fetchone()[0] > 0)
-        check("they carry the facebook platform tag",
-              con.execute("""SELECT COUNT(*) FROM messages m JOIN channels c ON c.id = m.channel_id
-                             WHERE c.topic LIKE 'secure/%' AND m.platform <> 'facebook'""").fetchone()[0] == 0)
-
+found = [s for s in detect(fx.exports["messenger"]) if getattr(s, "layout", None) == "secure"]
+check("the messages folder is detected", len(found) == 1)
+source = found[0]
+check("it is ingested as facebook", source.platform == "facebook", source.kind)
+check("media resolves beside it, not inside it",
+      source.media_root == fx.exports["messenger"].parent)
+check("encrypted chats reached the archive",
+      one("SELECT COUNT(*) FROM channels WHERE topic LIKE 'secure/%'") == 1)
+check("they carry the facebook platform tag",
+      one("""SELECT COUNT(*) FROM messages m JOIN channels c ON c.id = m.channel_id
+             WHERE c.topic LIKE 'secure/%' AND m.platform <> 'facebook'""") == 0)
+check(
+    "a counterpart known from a group chat stays one identity",
+    one("SELECT COUNT(*) FROM users WHERE platform = 'facebook' AND name = ?", (fixture.JANA,)) == 1,
+)
 check(
     "a DYI export's own messages folder is not mistaken for one",
-    not [s for s in detect(config.PROJECT_ROOT / "your_facebook_activity")
-         if getattr(s, "layout", None) == "secure"],
+    not [s for s in detect(fx.exports["facebook"]) if getattr(s, "layout", None) == "secure"],
 )
 
 # --------------------------------------------------------------------- api
 section("api endpoints")
 stats = client.get("/api/stats").json()
 check("GET /api/stats", stats["total"] == total, f"{stats['total']}")
+check("it names the archive it is serving", stats["db_path"] == str(fx.archive.path))
 
 threads = client.get("/api/threads").json()
-check("GET /api/threads", len(threads) > 0, f"{len(threads)} threads")
+check("GET /api/threads", len(threads) == 6, f"{len(threads)} threads")
+check("a conversation with nothing in it is not listed",
+      all(int(t["messages"]) > 0 for t in threads))
 check("thread ids are strings", all(isinstance(t["id"], str) for t in threads))
-check(
-    "no id lost precision",
-    all(str(int(t["id"])) == t["id"] for t in threads),
-)
+check("no id lost precision", all(str(int(t["id"])) == t["id"] for t in threads))
 
-biggest = max(threads, key=lambda t: t["messages"])
+biggest = max(threads, key=lambda t: int(t["messages"]))
 detail = client.get(f"/api/threads/{biggest['id']}").json()
-check("GET /api/threads/{id}", detail["messages"] == biggest["messages"])
+check("GET /api/threads/{id}", detail["messages"] == int(biggest["messages"]))
 check("month histogram present", len(detail["months"]) > 0, f"{len(detail['months'])} months")
+check("a missing thread is 404", client.get("/api/threads/12345").status_code == 404)
 
 page = client.get(f"/api/threads/{biggest['id']}/messages?limit=50").json()
 check("GET messages (latest page)", len(page["messages"]) == 50)
 check("messages ascend by time",
       all(a["timestamp"] <= b["timestamp"] for a, b in zip(page["messages"], page["messages"][1:])))
 
-older = client.get(
-    f"/api/threads/{biggest['id']}/messages?before={page['oldest']}&limit=50"
-).json()
+older = client.get(f"/api/threads/{biggest['id']}/messages?before={page['oldest']}&limit=50").json()
 check("keyset paging backwards", len(older["messages"]) == 50)
 check(
     "pages do not overlap",
     not ({m["message_id"] for m in older["messages"]} & {m["message_id"] for m in page["messages"]}),
 )
 
-first_month = detail["months"][0]
+first_month = next(m for m in detail["months"] if m["channel_id"] == biggest["id"])
 jump = client.get(
     f"/api/threads/{biggest['id']}/messages?ts={first_month['first_ts']}&limit=40"
 ).json()
@@ -225,20 +287,27 @@ check(
     jump["messages"][0]["timestamp"] <= first_month["first_ts"] <= jump["messages"][-1]["timestamp"]
     or jump["messages"][0]["timestamp"] == first_month["first_ts"],
 )
+check("attachments come with their messages",
+      any(m["attachments"] for m in client.get(
+          f"/api/threads/{biggest['id']}/messages?limit=200").json()["messages"]))
 
 section("one person, many chats")
-check(
-    "months are split by author",
-    all(m["mine"] + m["theirs"] == m["messages"] for m in detail["months"]),
-)
+check("months are split by author",
+      all(m["mine"] + m["theirs"] == m["messages"] for m in detail["months"]))
 check(
     "months carry the chat they belong to",
-    {m["channel_id"] for m in detail["months"]}
-    <= {t["id"] for t in detail["group"]["threads"]},
+    {m["channel_id"] for m in detail["months"]} <= {t["id"] for t in detail["group"]["threads"]},
+)
+check("the thread is in its own group",
+      biggest["id"] in {t["id"] for t in detail["group"]["threads"]})
+check(
+    "one person's chats on every platform are one group",
+    len(detail["group"]["threads"]) == 4,
+    f"{len(detail['group']['threads'])} chats under {detail['group']['person']}",
 )
 check(
-    "the thread is in its own group",
-    biggest["id"] in {t["id"] for t in detail["group"]["threads"]},
+    "the group spans all three platforms",
+    {t["platform"] for t in detail["group"]["threads"]} == {"discord", "facebook", "instagram"},
 )
 grouped = [t for t in threads if t["person_id"] is not None]
 check(
@@ -246,15 +315,18 @@ check(
     all(t["person"] for t in grouped),
     f"{len({t['person_id'] for t in grouped})} people over {len(grouped)} chats",
 )
-for candidate in sorted(threads, key=lambda t: -t["messages"]):
-    if candidate["person_id"] is None:
-        check(
-            "a chat with no mapped counterpart stands alone",
-            client.get(f"/api/threads/{candidate['id']}").json()["group"]["threads"] == []
-            or len(client.get(f"/api/threads/{candidate['id']}").json()["group"]["threads"]) == 1,
-        )
-        break
+alone = next(t for t in threads if t["person_id"] is None)
+check(
+    "a chat with no mapped counterpart stands alone",
+    len(client.get(f"/api/threads/{alone['id']}").json()["group"]["threads"]) == 1,
+    alone["name"],
+)
+check(
+    "a group chat has no single counterpart",
+    client.get(f"/api/threads/{alone['id']}").json()["group"]["person_id"] is None,
+)
 
+section("search")
 search = client.get("/api/search?q=necekal").json()
 plain = client.get("/api/search?q=nečekal").json()
 check("diacritics-insensitive search", search["total"] == plain["total"] > 0,
@@ -262,6 +334,7 @@ check("diacritics-insensitive search", search["total"] == plain["total"] > 0,
 check("search spans platforms",
       len({h["platform"] for h in search["hits"]}) > 1,
       str({h["platform"] for h in search["hits"]}))
+check("hits carry a highlighted snippet", "<mark>" in search["hits"][0]["snippet"])
 check("search injection is neutralised", client.get('/api/search?q=" OR 1=1 --').status_code == 200)
 check("empty search is handled", client.get("/api/search?q=   ").json()["total"] == 0)
 
@@ -282,17 +355,16 @@ check(
 )
 probe.close()
 
-lexicon = czech.lexicon()
-check(
-    "the Czech dictionary is built",
-    lexicon is not None,
-    str(config.LEXICON_PATH) if lexicon else "run: py -m archive czech-dict",
-)
+lexicon = Lexicon.open(config.lexicon_path())
+if lexicon is None:
+    skip("the Czech dictionary widens a search", "not built - run: py -m archive czech-dict")
+else:
+    check("the archive found the dictionary", fx.archive.lexicon is not None,
+          str(config.lexicon_path()))
 
-if lexicon is not None:
     def expand(word):
-        found = lexicon.expand(word)
-        return set(found.forms) if found else set()
+        result = lexicon.expand(word)
+        return set(result.forms) if result else set()
 
     hospoda, cekat, necekal = expand("hospoda"), expand("cekal"), expand("necekal")
     check("a noun widens to its whole paradigm",
@@ -318,6 +390,10 @@ if lexicon is not None:
           and czech_search["terms"][0]["forms"] > 1)
     check("an inflected form finds the same messages",
           client.get("/api/search?q=hospody").json()["total"] == czech_search["total"])
+    check("searching one polarity never returns the other",
+          client.get("/api/search?q=necekal").json()["total"]
+          + client.get("/api/search?q=cekal").json()["total"]
+          == client.get("/api/search?q=necekal OR cekal").json()["total"])
 
 section("the search query language")
 
@@ -327,6 +403,7 @@ def hits_for(q):
 
 
 beer, pub = hits_for("pivo"), hits_for("hospoda")
+check("both words are in the archive to begin with", beer > 0 and pub > 0, f"{beer} / {pub}")
 check("OR takes the union", hits_for("pivo OR hospoda") >= max(beer, pub) > 0,
       f"{hits_for('pivo OR hospoda')} >= max({beer}, {pub})")
 check("juxtaposition still means AND", hits_for("pivo hospoda") <= min(beer, pub))
@@ -369,24 +446,22 @@ check(
     "the hit is inside the returned context",
     hit["message_id"] in {m["message_id"] for m in context.json()["messages"]},
 )
+check("jumping to a message that is not there is 404",
+      client.get(f"/api/threads/{biggest['id']}/messages?at=1").status_code == 404)
 
 # ------------------------------------------------------- monthly statistics
 section("monthly statistics")
 
-scope = ",".join(t["id"] for t in detail["group"]["threads"]) or biggest["id"]
+scope = ",".join(t["id"] for t in detail["group"]["threads"])
 timeline = client.get("/api/stats/months", params={"threads": scope}).json()
 check("GET /api/stats/months", len(timeline["months"]) > 0, f"{len(timeline['months'])} months")
-check(
-    "monthly totals split by author",
-    all(m["mine"] + m["theirs"] == m["messages"] for m in timeline["months"]),
-)
+check("monthly totals split by author",
+      all(m["mine"] + m["theirs"] == m["messages"] for m in timeline["months"]))
 check("months come back in order",
       [m["month"] for m in timeline["months"]] == sorted(m["month"] for m in timeline["months"]))
 check(
     "the timeline totals the thread group",
-    timeline["total"] == sum(
-        int(t["messages"]) for t in threads if t["id"] in scope.split(",")
-    ),
+    timeline["total"] == sum(int(t["messages"]) for t in threads if t["id"] in scope.split(",")),
     f"{timeline['total']} messages",
 )
 
@@ -397,8 +472,9 @@ check(
     counted["total"] == scoped_hits["total"],
     f"{counted['total']} counted vs {scoped_hits['total']} found",
 )
-check("a counted word is widened like a search",
-      counted["terms"] and counted["terms"][0]["forms"] > 1)
+if lexicon is not None:
+    check("a counted word is widened like a search",
+          bool(counted["terms"]) and counted["terms"][0]["forms"] > 1)
 check("a word never outnumbers the messages carrying it", counted["total"] <= timeline["total"])
 check(
     "counted months are a subset of the whole history",
@@ -414,15 +490,26 @@ check("an empty scope is refused politely",
       client.get("/api/stats/months", params={"threads": ""}).status_code == 400)
 
 section("reaction notices and search normalisation")
+# A notice is only ever dropped when it carries nothing else, so the ones left
+# behind must all have an attachment, an embed or a reaction of their own.
 notices = [
-    row["text"]
-    for row in con.execute(
-        "SELECT text FROM messages "
-        "WHERE text LIKE '%to your message%' OR text LIKE '%liked a message%'"
+    row["message_id"]
+    for row in sql(
+        """
+        SELECT message_id, text FROM messages m
+        WHERE (text LIKE '%to your message%' OR text LIKE '%liked a message%')
+          AND NOT EXISTS(SELECT 1 FROM message_attachments WHERE message_id = m.message_id)
+          AND NOT EXISTS(SELECT 1 FROM message_embeds      WHERE message_id = m.message_id)
+          AND NOT EXISTS(SELECT 1 FROM message_reactions   WHERE message_id = m.message_id)
+        """
     )
     if is_reaction_notice(row["text"])
 ]
-check("no reaction pseudo-messages left in the archive", not notices, f"{len(notices)} found")
+check("no empty reaction pseudo-messages left in the archive", not notices, f"{len(notices)} found")
+check(
+    "but a notice carrying something of its own is kept",
+    one("SELECT COUNT(*) FROM messages WHERE text = 'Liked a message'") == 1,
+)
 check(
     "the notice filter knows a notice from a sentence",
     is_reaction_notice("Reacted 👍 to your message")
@@ -439,62 +526,71 @@ check(
 )
 
 group_ids = [t["id"] for t in detail["group"]["threads"]]
-scoped = client.get("/api/search?q=a&threads=" + ",".join(group_ids)).json()
+scoped = client.get("/api/search?q=pivo&threads=" + ",".join(group_ids)).json()
 check(
     "in-conversation search stays inside the group",
-    all(h["channel_id"] in group_ids for h in scoped["hits"]),
+    all(h["channel_id"] in group_ids for h in scoped["hits"]) and scoped["total"] > 0,
     f"{scoped['total']} hits across {len(group_ids)} chat(s)",
 )
-check(
-    "an empty thread filter finds nothing",
-    client.get("/api/search?q=a&threads=").json()["total"] == 0,
-)
+check("an empty thread filter finds nothing",
+      client.get("/api/search?q=pivo&threads=").json()["total"] == 0)
 
-sha = next(
-    (a["sha256"] for m in page["messages"] for a in m["attachments"] if a["sha256"]),
-    stored[0]["sha256"] if stored else None,
-)
-if sha:
-    media = client.get(f"/api/media/{sha}")
-    check("GET /api/media/{sha256}", media.status_code == 200, f"{len(media.content)} bytes")
+sha = stored[0]["sha256"]
+media = client.get(f"/api/media/{sha}")
+check("GET /api/media/{sha256}", media.status_code == 200, f"{len(media.content)} bytes")
+check("the bytes come back unchanged", media.content == fixture.PIXEL)
 check("bad media hash rejected", client.get("/api/media/nope").status_code == 400)
 check("unknown media hash is 404", client.get(f"/api/media/{'0' * 64}").status_code == 404)
 
 people = client.get("/api/people").json()
 check("GET /api/people", "identities" in people, f"{len(people['identities'])} identities")
 check("someone is marked as self", any(p["is_self"] for p in people["people"]))
+check("one person can hold three identities",
+      any(p["identities"] == 3 for p in people["people"]))
 
 check("GET /api/ingest/history", "ingest" in client.get("/api/ingest/history").json())
+check("every ingest run is logged as ok",
+      {r["status"] for r in client.get("/api/ingest/history").json()["ingest"]} == {"ok"})
 
-inspect = client.post("/api/ingest/inspect", json={"path": str(config.PROJECT_ROOT)}).json()
+inspect = client.post("/api/ingest/inspect", json={"path": str(fx.root)}).json()
 check("POST /api/ingest/inspect finds every export in the root",
       {s["label"] for s in inspect["sources"]}
       == {"Facebook", "Instagram", "Messenger (encrypted chats)"},
       str([s["label"] for s in inspect["sources"]]))
+check("it counts what it found before importing",
+      all(s["messages"] > 0 and s["threads"] > 0 for s in inspect["sources"]))
+nothing = fx.root / "nothing"
+nothing.mkdir(exist_ok=True)
 check(
     "inspect reports a useful error for a non-export folder",
-    "error" in client.post("/api/ingest/inspect", json={"path": r"C:\Windows"}).json(),
+    "error" in client.post("/api/ingest/inspect", json={"path": str(nothing)}).json(),
 )
 check("inspect requires a path", client.post("/api/ingest/inspect", json={}).status_code == 400)
+check(
+    "the connected archive is not offered as an import",
+    "error" in client.post(
+        "/api/ingest/inspect", json={"path": str(fx.archive.path)}
+    ).json(),
+)
 
-check("SPA deep link serves the app", client.get("/search").status_code == 200)
+if config.WEB_BUILD.is_dir():
+    check("SPA deep link serves the app", client.get("/search").status_code == 200)
+else:
+    skip("SPA deep link serves the app", "web UI not built - run: cd web && npm run build")
 
 # ---------------------------------------------------------- people editing
-section("people editing (creates a person, then removes it again)")
+section("people editing")
 NAME = "SMOKE Zkouška ěščř"
 RENAMED = NAME + " 2"
 before_people = client.get("/api/people").json()
 was_self = [p["person_id"] for p in before_people["people"] if p["is_self"]]
-victim = next(
-    r for r in before_people["identities"] if r["person_id"] is None and r["messages"] > 0
-)
+victim = next(r for r in before_people["identities"] if r["person_id"] is None and r["messages"] > 0)
 
 created = client.post("/api/people", json={"display": NAME, "user_ids": [victim["id"]]})
 check("POST /api/people creates and links", created.status_code == 200, created.text)
 person_id = created.json()["person_id"]
 check("duplicate name is refused", client.post("/api/people", json={"display": NAME}).status_code == 400)
 check("empty name is refused", client.post("/api/people", json={"display": " "}).status_code == 400)
-
 
 
 def linked_row(payload: dict) -> dict:
@@ -524,6 +620,8 @@ check("linking to a missing person is refused",
 
 check("delete removes the person", client.delete(f"/api/people/{person_id}").status_code == 200)
 final = client.get("/api/people").json()
+check("deleting a person only unlinks - no identity is lost",
+      len(final["identities"]) == len(before_people["identities"]))
 check("the archive is back where it started",
       len(final["people"]) == len(before_people["people"])
       and linked_row(final)["person_id"] is None)
@@ -532,45 +630,36 @@ for pid in was_self:
 check("the original self flag is restored",
       [p["person_id"] for p in client.get("/api/people").json()["people"] if p["is_self"]] == was_self)
 
-
 # ------------------------------------------------------ pluggable database
+section("pluggable database")
 # The archive is not part of the repository, so a fresh checkout has nothing to
 # read. Prove the app can be handed a database - including one it just made.
-section("pluggable database (creates a throwaway archive, then reconnects)")
-original_db = config.DB_PATH
-original_settings = config.SETTINGS_FILE.read_text(encoding="utf-8") if config.SETTINGS_FILE.is_file() else None
-
 status = client.get("/api/db").json()
 check("GET /api/db reports the connection", status["connected"] is True, status["path"])
 check("it counts what is inside", status["messages"] == total, str(status.get("messages")))
 
-try:
-    with tempfile.TemporaryDirectory() as tmp:
-        fresh = Path(tmp) / "fresh.sqlite"
-        made = client.post("/api/db/connect", json={"path": str(fresh), "create": True})
-        check("POST /api/db/connect --create builds an archive", made.status_code == 200, made.text)
-        check("the new archive is connected and empty",
-              made.json()["connected"] and made.json()["messages"] == 0, made.text)
-        check("every table is there", len(db_tables(fresh)) >= 20, f"{len(db_tables(fresh))} objects")
-        check("the viewer serves the empty archive", client.get("/api/threads").json() == [])
-        check("creating over an existing file is refused",
-              client.post("/api/db/connect", json={"path": str(fresh), "create": True}).status_code == 400)
-        check("connecting to a missing file is refused",
-              client.post("/api/db/connect", json={"path": str(Path(tmp) / "nope.sqlite")}).status_code == 400)
+with tempfile.TemporaryDirectory() as tmp:
+    fresh = Path(tmp) / "fresh.sqlite"
+    made = client.post("/api/db/connect", json={"path": str(fresh), "create": True})
+    check("POST /api/db/connect --create builds an archive", made.status_code == 200, made.text)
+    check("the new archive is connected and empty",
+          made.json()["connected"] and made.json()["messages"] == 0, made.text)
+    check("every table is there", len(db_tables(fresh)) >= 20, f"{len(db_tables(fresh))} objects")
+    check("the viewer serves the empty archive", client.get("/api/threads").json() == [])
+    check("creating over an existing file is refused",
+          client.post("/api/db/connect", json={"path": str(fresh), "create": True}).status_code == 400)
+    check("connecting to a missing file is refused",
+          client.post("/api/db/connect", json={"path": str(Path(tmp) / "nope.sqlite")}).status_code == 400)
+    check("connecting to something that is not a database is refused",
+          client.post("/api/db/connect", json={"path": str(Path(tmp))}).status_code == 400)
 
-        back = client.post("/api/db/connect", json={"path": str(original_db)})
-        check("reconnecting to the real archive works", back.status_code == 200, back.text)
-        check("all the messages are back", back.json()["messages"] == total, back.text)
-finally:
-    # Whatever happened above, this machine must end up on its own archive.
-    if original_settings is None:
-        config.forget()
-    else:
-        config.SETTINGS_FILE.write_text(original_settings, encoding="utf-8")
-        config._resolve()
+    back = client.post("/api/db/connect", json={"path": str(fx.archive.path)})
+    check("reconnecting to the fixture archive works", back.status_code == 200, back.text)
+    check("all the messages are back", back.json()["messages"] == total, back.text)
 
-check("the original database is connected again", config.DB_PATH == original_db, str(config.DB_PATH))
-
+check("the choice was remembered", config.load_settings().get("db_path") == str(fx.archive.path))
+check("and it was remembered in the fixture's settings, not this machine's",
+      config.SETTINGS_FILE.parent == fx.root)
 
 # ------------------------------------------------------------ file dialogs
 # The native dialog runs in a subprocess, and its answer used to come back
@@ -589,197 +678,120 @@ check(
 )
 
 # ------------------------------------------------------------ .dht import
-# A tracker file is a SQLite database of its own, so importing it is a copy. One
-# is built here from scratch, in DHT's exact table shapes and without any of the
-# columns this archive adds, then imported into a throwaway archive twice.
-section("discord .dht import (builds a tracker file, imports it twice)")
+# A tracker file is a SQLite database of its own, so importing it is a copy.
+# The fixture already built one; import it into a *second* archive here, twice,
+# where the counts can be exact.
+section("discord .dht import (a second archive, imported into twice)")
+tracker = fx.exports["discord"]
 
-DHT_SCHEMA = """
-CREATE TABLE servers (id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL);
-CREATE TABLE channels (id INTEGER PRIMARY KEY NOT NULL, server INTEGER NOT NULL, name TEXT NOT NULL,
-    parent_id INTEGER, position INTEGER, topic TEXT, nsfw INTEGER);
-CREATE TABLE users (id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, display_name TEXT,
-    avatar_url TEXT, discriminator TEXT);
-CREATE TABLE messages (message_id INTEGER PRIMARY KEY NOT NULL, sender_id INTEGER NOT NULL,
-    channel_id INTEGER NOT NULL, text TEXT NOT NULL, timestamp INTEGER NOT NULL);
-CREATE TABLE attachments (attachment_id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL,
-    type TEXT, normalized_url TEXT NOT NULL, download_url TEXT, size INTEGER NOT NULL,
-    width INTEGER, height INTEGER);
-CREATE TABLE message_attachments (message_id INTEGER NOT NULL, attachment_id INTEGER NOT NULL,
-    PRIMARY KEY (message_id, attachment_id));
-CREATE TABLE download_metadata (normalized_url TEXT NOT NULL PRIMARY KEY,
-    download_url TEXT NOT NULL, status INTEGER NOT NULL, type TEXT, size INTEGER);
-CREATE TABLE download_blobs (normalized_url TEXT NOT NULL PRIMARY KEY, blob BLOB NOT NULL);
-CREATE TABLE message_reactions (message_id INTEGER NOT NULL, emoji_id INTEGER, emoji_name TEXT,
-    emoji_flags INTEGER NOT NULL, count INTEGER NOT NULL);
-CREATE TABLE message_embeds (message_id INTEGER NOT NULL, json TEXT NOT NULL);
-CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
-"""
-
-# A real 1x1 PNG, so what comes back out of the vault can be compared byte for byte.
-PIXEL = bytes.fromhex(
-    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
-    "1f15c4890000000a49444154789c63000100000500010d0a2db4000000"
-    "0049454e44ae426082"
+found = detect(tracker)
+check("a .dht file is recognised", [s.kind for s in found] == ["discord"], str(found))
+check(
+    "its contents are reported before importing",
+    (found[0].summary()["threads"], found[0].summary()["messages"]) == (1, 3),
+    str(found[0].summary()),
 )
-PIXEL_URL = "https://cdn.discordapp.com/attachments/1/2/pixel.png"
+check("picking the folder finds it too", [s.kind for s in detect(tracker.parent)] == ["discord"])
+check("the connected archive is not an import",
+      refused(lambda: detect(fx.archive.path, connected=fx.archive.path)))
+decoy = fx.root / "notes.txt"
+decoy.write_text("not a database", encoding="utf-8")
+check("a file that is not a tracker is refused", refused(lambda: detect(decoy)))
 
+with tempfile.TemporaryDirectory() as tmp:
+    second = Archive.create(Path(tmp) / "target.sqlite", Path(tmp) / "vault", verbose=False)
+    check("a second archive can be open at the same time", second.path != fx.archive.path)
 
-def build_dht(path: Path) -> None:
-    """A miniature tracker file: two people, three messages, one attachment."""
-    src = sqlite3.connect(str(path))
-    with src:
-        src.executescript(DHT_SCHEMA)
-        src.execute("INSERT INTO servers VALUES (900001, 'DM', 'DM')")
-        src.execute(
-            "INSERT INTO channels VALUES (900002, 900001, 'smoke-dm', NULL, NULL, NULL, NULL)"
-        )
-        src.executemany(
-            "INSERT INTO users VALUES (?, ?, ?, ?, ?)",
-            [
-                (900003, "smoketester", "Smoke Tester", None, None),
-                (900004, "othersmoke", "Other Smoke", None, None),
-            ],
-        )
-        src.executemany(
-            "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
-            [
-                (900010, 900003, 900002, "smoketest hello", 1700000000000),
-                (900011, 900004, 900002, "smoketest odpověď", 1700000001000),
-                (900012, 900003, 900002, "", 1700000002000),
-            ],
-        )
-        src.execute(
-            "INSERT INTO attachments VALUES (900020, 'pixel.png', 'image/png', ?, ?, ?, 1, 1)",
-            (PIXEL_URL, PIXEL_URL, len(PIXEL)),
-        )
-        src.execute("INSERT INTO message_attachments VALUES (900012, 900020)")
-        src.execute(
-            "INSERT INTO download_metadata VALUES (?, ?, 200, 'image/png', ?)",
-            (PIXEL_URL, PIXEL_URL, len(PIXEL)),
-        )
-        src.execute("INSERT INTO download_blobs VALUES (?, ?)", (PIXEL_URL, PIXEL))
-        src.execute("INSERT INTO message_reactions VALUES (900010, NULL, 'thumbsup', 0, 1)")
-        src.execute('INSERT INTO message_embeds VALUES (900011, \'{"url": "x"}\')')
-        src.execute("INSERT INTO metadata VALUES ('version', '1')")
-    src.close()
+    first = dict(runner.ingest_path(second, tracker))["discord"]
+    check("every message is imported", first.new_msgs == 3, f"{first.new_msgs} new")
+    check("the embedded attachment lands in the vault", first.new_media == 1,
+          f"{first.new_media} stored")
 
+    two = second.read()
+    at = lambda q: two.execute(q).fetchone()[0]  # noqa: E731
+    check("imported rows are labelled as Discord",
+          at("SELECT COUNT(*) FROM messages WHERE platform = 'discord'") == 3)
+    check("the child tables come along",
+          (at("SELECT COUNT(*) FROM message_reactions"),
+           at("SELECT COUNT(*) FROM message_embeds"),
+           at("SELECT COUNT(*) FROM message_attachments")) == (1, 1, 1))
+    check("the triggers build the full-text index as it goes",
+          at("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'hospoda'") == 1)
+    check("diacritics fold on imported text too",
+          at("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'necekal'") == 1)
+    blob = two.execute(
+        "SELECT sha256, local_path FROM attachments WHERE attachment_id = 900020"
+    ).fetchone()
+    check("the attachment row points at its bytes", bool(blob["sha256"] and blob["local_path"]))
+    check("and the bytes in the vault are the ones from the file",
+          second.vault.abspath(blob["local_path"]).read_bytes() == fixture.PIXEL)
 
-original_db, original_vault = config.DB_PATH, config.VAULT_DIR
-try:
-    with tempfile.TemporaryDirectory() as tmp:
-        folder = Path(tmp)
-        tracker = folder / "smoke.dht"
-        build_dht(tracker)
-        target = folder / "target.sqlite"
-        target.touch()
-        config.use(target, folder / "vault")
+    vault_before = sorted(f.name for f in second.vault.root.rglob("*"))
+    again = dict(runner.ingest_path(second, tracker))["discord"]
+    check("re-importing the same file adds nothing",
+          (again.new_msgs, again.new_media) == (0, 0),
+          f"{again.new_msgs} messages, {again.new_media} media")
+    check("and it says why", again.dup_msgs == 3, f"{again.dup_msgs} duplicates")
+    check("the vault is untouched",
+          sorted(f.name for f in second.vault.root.rglob("*")) == vault_before)
+    check("nothing was duplicated", second.read().execute(
+        "SELECT COUNT(*) FROM messages").fetchone()[0] == 3)
+    check("both runs are logged",
+          [r[0] for r in second.read().execute(
+              "SELECT status FROM ingest_log ORDER BY run_id")] == ["ok", "ok"])
+    second.close()
 
-        found = detect(tracker)
-        check("a .dht file is recognised", [s.kind for s in found] == ["discord"], str(found))
-        check(
-            "its contents are reported before importing",
-            (found[0].summary()["threads"], found[0].summary()["messages"]) == (1, 3),
-            str(found[0].summary()),
-        )
-        check("picking the folder finds it too", [s.kind for s in detect(folder)] == ["discord"])
-        check("the connected archive is not an import", refused(lambda: detect(target)))
-        decoy = folder / "notes.txt"
-        decoy.write_text("not a database", encoding="utf-8")
-        check("a file that is not a tracker is refused", refused(lambda: detect(decoy)))
+check("the fixture archive was not touched by any of that",
+      one("SELECT COUNT(*) FROM messages") == total)
 
-        first = dict(ingest_path(tracker))["discord"]
-        check("every message is imported", first.new_msgs == 3, f"{first.new_msgs} new")
-        check("the embedded attachment lands in the vault", first.new_media == 1,
-              f"{first.new_media} stored")
-
-        dest = sqlite3.connect(str(target))
-        dest.row_factory = sqlite3.Row
-        one = lambda sql: dest.execute(sql).fetchone()[0]  # noqa: E731
-        check("imported rows are labelled as Discord",
-              one("SELECT COUNT(*) FROM messages WHERE platform = 'discord'") == 3)
-        check("the child tables come along",
-              (one("SELECT COUNT(*) FROM message_reactions"),
-               one("SELECT COUNT(*) FROM message_embeds"),
-               one("SELECT COUNT(*) FROM message_attachments")) == (1, 1, 1))
-        check("the triggers build the full-text index as it goes",
-              one("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'smoketest'") == 2)
-        check("diacritics fold on imported text too",
-              one("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'odpoved'") == 1)
-        stored = dest.execute(
-            "SELECT sha256, local_path FROM attachments WHERE attachment_id = 900020"
-        ).fetchone()
-        check("the attachment row points at its bytes",
-              bool(stored["sha256"] and stored["local_path"]))
-        check("and the bytes in the vault are the ones from the file",
-              (config.VAULT_DIR / stored["local_path"]).read_bytes() == PIXEL)
-        dest.close()
-
-        vault_before = sorted(f.name for f in config.VAULT_DIR.rglob("*"))
-        second = dict(ingest_path(tracker))["discord"]
-        check("re-importing the same file adds nothing",
-              (second.new_msgs, second.new_media) == (0, 0),
-              f"{second.new_msgs} messages, {second.new_media} media")
-        check("and it says why", second.dup_msgs == 3, f"{second.dup_msgs} duplicates")
-        check("the vault is untouched",
-              sorted(f.name for f in config.VAULT_DIR.rglob("*")) == vault_before)
-
-        dest = sqlite3.connect(str(target))
-        check("nothing was duplicated",
-              dest.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 3)
-        check("both runs are logged",
-              [r[0] for r in dest.execute("SELECT status FROM ingest_log ORDER BY run_id")]
-              == ["ok", "ok"])
-        dest.close()
-finally:
-    config.use(original_db, original_vault)
-
-check("the real archive is connected again", config.DB_PATH == original_db, str(config.DB_PATH))
-
+# `py -m archive discord-media` sweeps the whole archive rather than one import.
+# It makes no network calls: the only Discord attachments that survive are the
+# ones the tracker embedded, and those are already in the vault by now.
+recovered = runner.ingest_discord_media(fx.archive)
+check("discord-media finds the embedded blob", recovered.media_seen == 1,
+      f"{recovered.media_seen} seen")
+check("and re-storing it is a no-op", recovered.new_media == 0 and recovered.dup_media == 1)
+check("it adds no messages and loses none", one("SELECT COUNT(*) FROM messages") == total)
 
 # --------------------------------------------------------------- idempotency
 section("ingest idempotency (re-running must change nothing)")
 before_counts = (
     total,
-    con.execute("SELECT COUNT(*) FROM attachments").fetchone()[0],
-    len(list(config.VAULT_DIR.rglob("*"))) if config.VAULT_DIR.is_dir() else 0,
+    one("SELECT COUNT(*) FROM attachments"),
+    len(list(fx.archive.vault.root.rglob("*"))),
 )
 
-for folder in ("your_instagram_activity", "your_facebook_activity", "messages"):
-    path = config.PROJECT_ROOT / folder
-    if not path.is_dir():
-        continue
-    for kind, stats_row in ingest_path(path):
-        check(f"re-ingest {kind}: no new messages", stats_row.new_msgs == 0,
-              f"{stats_row.dup_msgs} duplicates skipped")
-        check(f"re-ingest {kind}: no new media", stats_row.new_media == 0)
-        if kind != "messenger":
-            # Meta writes the literal "Failed to download media" in place of a
-            # URI for media it could not export; those stay unresolvable.
-            check(f"re-ingest {kind}: nothing missing", stats_row.missing_media == 0)
-        if kind == "instagram":
-            check(
-                "re-ingest drops Instagram's reaction notices",
-                stats_row.skipped_notices > 0,
-                f"{stats_row.skipped_notices} ignored",
-            )
+for kind, stats_row in runner.ingest_path(fx.archive, fx.root):
+    check(f"re-ingest {kind}: no new messages", stats_row.new_msgs == 0,
+          f"{stats_row.dup_msgs} duplicates skipped")
+    check(f"re-ingest {kind}: no new media", stats_row.new_media == 0)
+    if kind != "messenger":
+        # Meta writes the literal "Failed to download media" in place of a URI
+        # for media it could not export; those stay unresolvable.
+        check(f"re-ingest {kind}: nothing missing", stats_row.missing_media == 0)
+    if kind == "instagram":
+        check("re-ingest drops Instagram's reaction notices", stats_row.skipped_notices == 3,
+              f"{stats_row.skipped_notices} ignored")
 
-con.close()
-con = db.connect_ro()
+for kind, stats_row in runner.ingest_path(fx.archive, fx.exports["discord"]):
+    check("re-ingest discord: no new messages", stats_row.new_msgs == 0)
+
 after_counts = (
-    con.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
-    con.execute("SELECT COUNT(*) FROM attachments").fetchone()[0],
-    len(list(config.VAULT_DIR.rglob("*"))) if config.VAULT_DIR.is_dir() else 0,
+    one("SELECT COUNT(*) FROM messages"),
+    one("SELECT COUNT(*) FROM attachments"),
+    len(list(fx.archive.vault.root.rglob("*"))),
 )
 check("row and file counts unchanged", before_counts == after_counts,
       f"{before_counts} -> {after_counts}")
-check(
-    "full-text index still in step",
-    con.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0] == after_counts[0],
-)
+check("full-text index still in step", one("SELECT COUNT(*) FROM messages_fts") == after_counts[0])
+
+# ------------------------------------------------------------------- done
+fx.close()
 
 print()
+if skipped:
+    print(f"{len(skipped)} skipped: {', '.join(skipped)}")
 if failures:
     print(f"{len(failures)} FAILED: {', '.join(failures)}")
     sys.exit(1)
-print("all checks passed")
+print(f"all checks passed ({fx.root.name} cleaned up)")

@@ -1,25 +1,27 @@
 # Chat Archive
 
-Your Discord, Facebook Messenger and Instagram conversations, in one place, on your own machine.
+Read and search your Discord, Facebook Messenger and Instagram conversations in one place, **offline on device**.
 
-Chat exports are unreadable by design: a folder of JSON files per service, each with its own
-shape, its own idea of who people are, and media scattered across subfolders. This app ingests
-them into a single SQLite database and serves the whole history in a browser — one searchable
-timeline, whoever you were talking to and wherever you were talking to them.
+## What is this tool for:
+
+- It processes your exported chat conversations and creates local sqlite database.
+- Then enables to view the content of the local database in browser.
+- Has full-text search and the ability to link conversations with one person across platforms.
+- Simple statistics for received / sent messages and for used words.
+
+Technical notes of my solution:
 
 - **One database.** Every platform lands in the same tables, told apart by a `platform` column.
-- **Safe to re-run.** Meta exports repeat the last few months every time; already-imported
-  messages are skipped and already-stored media is not copied again.
+- **Safe to re-run.** Already-imported messages are skipped and already-stored media is not copied again.
 - **Search that works in Czech.** Full-text over every message, diacritics-insensitive, and
-  aware of Czech inflection: search `hospoda` and you also get `hospody`, `hospodě`, `hospodu`.
-  Combine words with `OR`, `-` and brackets.
+  aware of Czech inflection: search `hospoda` and you also get inflected forms like `hospody`, `hospodě`, `hospodu`.
+  More complex queries supported (same logic as in Google search: `OR`, `-` and brackets).
 - **One person, many accounts.** Link someone's Discord, Facebook and Instagram identities and
   give them a name; that name is what the whole app shows.
 - **Words over time.** Pick a person and see every message they exchanged as a line, month by
   month. Type a word and the line becomes the months they used it — in every form, the same
   search, counted instead of listed. Pick up to ten people to compare them on one chart.
-- **Nothing leaves the machine.** No cloud, no CDN, no telemetry. The archive is a file you own,
-  and it is never part of this repository.
+- **Nothing leaves the machine.** No cloud, no CDN, no telemetry. The archive is a file you own.
 
 ## Setup
 
@@ -31,23 +33,17 @@ cd chat-archive/app
 pip install -r requirements.txt
 cd web && npm install && npm run build && cd ..
 
-py -m archive czech-dict     # build the Czech dictionary search widens words with
+py -m archive czech-dict     # build the Czech dictionary search widens words with - only if you need it
 py -m archive serve          # http://127.0.0.1:8765
 ```
 
-`czech-dict` takes about fifteen seconds and writes a 149 MB file next to your archive. Skip it
-and everything still works — search just matches words literally instead of in every inflected
-form. The dictionary's licence is non-commercial; see `data/czech/NOTICE.md`.
-
-The first run opens on **Connect a database**, because the archive lives wherever you keep it.
-Choose **Start an empty archive…**, pick a location, and you have somewhere to import into. If
-you already have one, point the app at that file instead. The choice is remembered.
+`czech-dict` takes about fifteen seconds and writes a 149 MB file next to your archive.
 
 ## Getting your exports
 
 Messenger needs **two** downloads, and they are not interchangeable. Facebook's own export
 carries group and community chats; your private one-to-one chats are encrypted end to end, so Meta
-cannot read them and cannot put them in that file. They come from Messenger separately. Do both.
+cannot read them and cannot put them in that file. They come from Messenger separately.
 
 ### Facebook
 
@@ -87,9 +83,7 @@ then exactly as for Facebook above.
 ### Discord
 
 Discord has no official export, so use **[Discord History Tracker](https://dht.chylex.com/)** — a
-free, open-source tool that saves your history to a `.dht` file (SQLite) as you browse. In its
-settings, turn **attachment downloading on**: Discord's CDN links are signed and expire about a
-day after they are issued, so anything not downloaded while it is fresh is gone for good.
+free, open-source tool that saves your history to a `.dht` file (SQLite) as you browse. Unfortunately images and file stored on discord servers are unreachable by this scraping tool, Discord's CDN links are signed and expire in several hours after they are issued, so anything not downloaded while it is fresh is gone for good.
 
 The `.dht` file it writes is imported like any other export — leave it wherever the tracker keeps
 it. Re-import it whenever you have scraped more; only new messages are added.
@@ -102,20 +96,13 @@ terminal:
 
 ```
 py -m archive ingest "C:/path/to/your_instagram_activity"
+py -m archive ingest "C:/path/to/your_facebook_activity"
 py -m archive ingest "C:/path/to/messages"          # encrypted Messenger chats
 py -m archive ingest "C:/path/to/discord_archive.dht"
 ```
 
-Either way it is safe to re-run: anything already in the archive is skipped. Attachments come
-along with the messages — for Discord that means whatever the tracker managed to embed, which is
-why turning its downloading on matters. Once imported, media has been copied into the archive's
+Either way it is safe to re-run: anything already in the archive is skipped. Once imported, media has been copied into the archive's
 vault, so you can delete the export folder.
-
-## Then
-
-Browse conversations, jump around 100k-message threads by month, search everything at once, use
-the **People** page to tie one person's accounts together under a name of your choosing, and open
-**Stats** to see how much — and how often a particular word — was said over the years.
 
 Full write-up of the schema, the deduplication, the encoding repair and everything else:
 **[DOCUMENTATION.md](DOCUMENTATION.md)**.

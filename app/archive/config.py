@@ -1,50 +1,52 @@
-"""Filesystem locations and server settings.
+"""Where to look for an archive, and what to remember about the last one.
 
-Every path is resolved once, here, so the rest of the package never guesses.
+This module answers one question - *which archive should this machine use?* - and
+answers it as a value, not as state. Nothing here holds an open archive; that is
+`archive.Archive`, which takes a `Location` and owns everything downstream of it.
+Keeping the two apart is what lets a test build an archive in a temp folder
+without disturbing the one you actually use.
 
-The database is *pluggable*: this repository carries no archive of its own, so
-on a fresh clone there is simply nothing connected yet. `connect_db()` points
-the app at a `.sqlite` file (or creates an empty one) and remembers the choice
-in `settings.local.json`, which stays out of version control because it names
-paths that only make sense on one machine.
+The database is *pluggable*: this repository carries no archive of its own, so on
+a fresh clone there is simply nothing connected yet. `Archive.create()` makes an
+empty one, `remember()` writes the choice to `settings.local.json`, and that file
+stays out of version control because it names paths that only make sense here.
 
 Resolution order, highest first:
 
-    1. the ARCHIVE_DB / ARCHIVE_VAULT environment variables
-    2. settings.local.json, written by `connect_db()` or `py -m archive db`
-    3. the conventional location next to this checkout, if it exists
-    4. nothing - the UI then asks for a database instead of erroring
+    1. the ARCHIVE_DB / ARCHIVE_VAULT / ARCHIVE_LEXICON environment variables
+    2. settings.local.json, written by `remember()`
+    3. nothing - the UI then asks for a database instead of erroring
+
+There is deliberately no built-in default archive location. Nobody's archive is
+in a place this file could guess, so guessing would only ever be right on the
+machine the guess was written on.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 # app/archive/config.py -> app/archive -> app -> project root
 APP_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = APP_DIR.parent
 
+# Untracked, and next to the checkout rather than inside it: this is where an
+# archive, its media and the compiled dictionary land unless you say otherwise.
 ARCHIVES_DIR = PROJECT_ROOT / "Archives"
 SETTINGS_FILE = APP_DIR / "settings.local.json"
 
-# Where an archive lives if you never say otherwise - the layout this project
-# grew up in. Used only when the file is actually there.
-DEFAULT_DB = ARCHIVES_DIR / "discord_archive_custom.sqlite"
-DEFAULT_VAULT = Path(r"D:\4 Archives\chat_media_vault")
+# What a new archive is called when you do not name it yourself.
+NEW_DB_NAME = "chatArchive.sqlite"
+VAULT_NAME = "chat_media_vault"
 
 # The Czech dictionary: three source files in the repository, compiled once
-# into a lookup database beside the archive by `py -m archive czech-dict`.
-# The compiled file is derived data and stays out of version control.
+# into a lookup database by `py -m archive czech-dict`. The compiled file is
+# derived data and stays out of version control.
 CZECH_DATA = PROJECT_ROOT / "data" / "czech"
 DEFAULT_LEXICON = ARCHIVES_DIR / "czech_lemmas.sqlite"
-
-# Pre-existing Discord attachment downloads, folded into the vault on migrate.
-LEGACY_DISCORD_MEDIA = [
-    Path(r"D:\4 Archives\discord_image_archive"),
-    ARCHIVES_DIR / "images",
-]
 
 WEB_BUILD = APP_DIR / "web" / "build"
 
@@ -53,15 +55,18 @@ PORT = int(os.environ.get("ARCHIVE_PORT", "8765"))
 
 PLATFORMS = ("discord", "facebook", "instagram")
 
-# Filled in by _resolve() below. DB_PATH is None when nothing is connected yet.
-DB_PATH: Path | None = None
-VAULT_DIR: Path = DEFAULT_VAULT
-# None until the dictionary is built; search then just stops widening.
-LEXICON_PATH: Path | None = None
-
 
 class NoDatabase(RuntimeError):
     """Raised when something needs the archive but none is connected."""
+
+
+@dataclass(frozen=True)
+class Location:
+    """Everything an archive needs to know about where its parts are kept."""
+
+    db_path: Path
+    vault_path: Path
+    lexicon_path: Path
 
 
 def load_settings() -> dict:
@@ -76,101 +81,59 @@ def save_settings(settings: dict) -> None:
 
 
 def default_vault_for(db_path: Path) -> Path:
-    """Where a freshly connected database keeps its media."""
-    return db_path.parent / "chat_media_vault"
+    """Where a freshly connected database keeps its media: right beside it."""
+    return Path(db_path).parent / VAULT_NAME
 
 
-def _resolve() -> None:
-    """Recompute DB_PATH, VAULT_DIR and LEXICON_PATH from env and settings."""
-    global DB_PATH, VAULT_DIR, LEXICON_PATH
+def lexicon_path() -> Path:
+    """Where the compiled Czech dictionary is looked for."""
+    env = os.environ.get("ARCHIVE_LEXICON")
+    return Path(env) if env else DEFAULT_LEXICON
+
+
+def resolve() -> Location | None:
+    """Which archive this machine should use, or None when there is no answer.
+
+    None is not a failure: a fresh clone has no archive, and the UI turns that
+    into the "Connect a database" screen rather than an error.
+    """
     settings = load_settings()
 
     env_db = os.environ.get("ARCHIVE_DB")
     if env_db:
-        DB_PATH = Path(env_db)
+        db_path = Path(env_db)
     elif settings.get("db_path"):
-        DB_PATH = Path(settings["db_path"])
-    elif DEFAULT_DB.is_file():
-        DB_PATH = DEFAULT_DB
+        db_path = Path(settings["db_path"])
     else:
-        DB_PATH = None
+        return None
+
+    return Location(db_path, vault_for(db_path, settings), lexicon_path())
+
+
+def vault_for(db_path: Path | str, settings: dict | None = None) -> Path:
+    """Which vault belongs to this database.
+
+    An explicit ARCHIVE_VAULT wins. A database we have connected to before keeps
+    the vault it was remembered with, wherever that is - moving an archive must
+    not strand its media. Anything else gets a vault beside it.
+    """
+    db_path = Path(db_path)
+    settings = load_settings() if settings is None else settings
 
     env_vault = os.environ.get("ARCHIVE_VAULT")
     if env_vault:
-        VAULT_DIR = Path(env_vault)
-    elif settings.get("vault_path"):
-        VAULT_DIR = Path(settings["vault_path"])
-    elif DEFAULT_VAULT.is_dir():
-        VAULT_DIR = DEFAULT_VAULT
-    elif DB_PATH is not None:
-        VAULT_DIR = default_vault_for(DB_PATH)
-    else:
-        VAULT_DIR = DEFAULT_VAULT
+        return Path(env_vault)
 
-    env_lexicon = os.environ.get("ARCHIVE_LEXICON")
-    LEXICON_PATH = Path(env_lexicon) if env_lexicon else DEFAULT_LEXICON
-
-
-_resolve()
-
-
-def is_connected() -> bool:
-    return DB_PATH is not None and DB_PATH.is_file()
-
-
-def require_db() -> Path:
-    """The connected database, or a clear error naming the way out."""
-    if DB_PATH is None:
-        raise NoDatabase(
-            "No archive database is connected. Open the app and use Connect a "
-            "database, or run: py -m archive db <path to .sqlite>"
-        )
-    if not DB_PATH.is_file():
-        raise NoDatabase(f"The connected database is missing: {DB_PATH}")
-    return DB_PATH
-
-
-def use(db_path: Path | str, vault_path: Path | str | None = None) -> None:
-    """Point this process at a database without writing any settings."""
-    global DB_PATH, VAULT_DIR
-    DB_PATH = Path(db_path)
-    VAULT_DIR = Path(vault_path) if vault_path else default_vault_for(DB_PATH)
-
-
-def connect_db(db_path: Path | str, vault_path: Path | str | None = None) -> Path:
-    """Remember `db_path` as the archive to use, from now on and next time.
-
-    Asking for a database explicitly beats a launch-time ARCHIVE_DB for the rest
-    of this process; set that variable again next start if you want it back.
-    """
-    path = Path(db_path).expanduser().resolve()
-    if not path.is_file():
-        raise NoDatabase(f"No such database file: {path}")
-    vault = Path(vault_path).expanduser().resolve() if vault_path else _vault_beside(path)
-    settings = load_settings()
-    settings["db_path"] = str(path)
-    settings["vault_path"] = str(vault)
-    save_settings(settings)
-    use(path, vault)
-    return path
-
-
-def _vault_beside(db_path: Path) -> Path:
-    """Keep an existing vault if it is already the one in use, else co-locate."""
-    if DB_PATH is not None and DB_PATH.resolve() == db_path and VAULT_DIR.is_dir():
-        return VAULT_DIR
-    if db_path == DEFAULT_DB.resolve() and DEFAULT_VAULT.is_dir():
-        return DEFAULT_VAULT
+    remembered, seen = settings.get("vault_path"), settings.get("db_path")
+    if remembered and seen and Path(seen) == db_path:
+        return Path(remembered)
     return default_vault_for(db_path)
 
 
-def forget() -> None:
-    """Drop the remembered database (used by tests to restore the default)."""
+def remember(db_path: Path, vault_path: Path) -> None:
+    """Use this archive from now on, and next time the app starts."""
     settings = load_settings()
-    settings.pop("db_path", None)
-    settings.pop("vault_path", None)
-    if settings:
-        save_settings(settings)
-    else:
-        SETTINGS_FILE.unlink(missing_ok=True)
-    _resolve()
+    settings["db_path"] = str(db_path)
+    settings["vault_path"] = str(vault_path)
+    save_settings(settings)
+

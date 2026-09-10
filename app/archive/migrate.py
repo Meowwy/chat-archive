@@ -1,7 +1,7 @@
 """Idempotent schema migrations for the unified archive database.
 
 The database started life as an append-only mirror of Discord History Tracker's
-`.dht` file (see Archives/sync_dht.py). Every DHT table keeps its original shape
+`.dht` file. Every DHT table keeps its original shape
 and column order; we only ever *append* columns, all with defaults, so the
 mirror's `INSERT ... SELECT` copy keeps working and existing queries are
 unaffected.
@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, db, noise
+from . import db, noise
 
 SCHEMA_VERSION = 2
 
@@ -33,12 +33,11 @@ def _add_column(con: sqlite3.Connection, table: str, column: str, decl: str) -> 
 
 
 # --- the base tables ------------------------------------------------------
-# Discord History Tracker's own shapes, verbatim, so `Archives/sync_dht.py`
-# can keep mirroring into this database. Existing archives already have every
-# one of these; running them matters only when creating an empty archive from
-# scratch, which is what makes the database pluggable. This is the single
-# source of truth - sync_dht.py falls back to its own copy only when the
-# archive package cannot be imported at all.
+# Discord History Tracker's own shapes, verbatim, so a `.dht` file copies
+# straight in and any SQL written against a tracker database keeps working.
+# Existing archives already have every one of these; running them matters only
+# when creating an empty archive from scratch, which is what makes the database
+# pluggable.
 _BASE_TABLES = """
 CREATE TABLE IF NOT EXISTS servers (
     id   INTEGER PRIMARY KEY NOT NULL,
@@ -130,57 +129,6 @@ CREATE TABLE IF NOT EXISTS download_blobs (
 CREATE TABLE IF NOT EXISTS metadata (
     key   TEXT PRIMARY KEY,
     value TEXT
-);
-
--- Custom tables --
-
-CREATE TABLE IF NOT EXISTS downloaded_images (
-    attachment_id     INTEGER PRIMARY KEY,
-    image_id          TEXT UNIQUE,            -- e.g. 20260426_1234567890_1 (filename stem)
-    message_id        INTEGER NOT NULL,
-    channel_id        INTEGER NOT NULL,
-    source_url        TEXT NOT NULL,
-    local_path        TEXT,                   -- relative to D:/4 Archives/discord_image_archive/
-    status            TEXT NOT NULL,
-    http_status       INTEGER,
-    file_size         INTEGER,
-    sha256            TEXT,
-    error             TEXT,
-    attempt_count     INTEGER NOT NULL DEFAULT 0,
-    last_attempt_at   INTEGER NOT NULL,
-    downloaded_at     INTEGER
-);
-CREATE INDEX IF NOT EXISTS downloaded_images_status_ix ON downloaded_images(status);
-CREATE INDEX IF NOT EXISTS downloaded_images_message_ix ON downloaded_images(message_id);
-
-CREATE TABLE IF NOT EXISTS downloaded_files (
-    attachment_id     INTEGER PRIMARY KEY,
-    file_id           TEXT UNIQUE,            -- e.g. 20260426_1234567890_1 (filename stem)
-    message_id        INTEGER NOT NULL,
-    channel_id        INTEGER NOT NULL,
-    source_url        TEXT NOT NULL,
-    local_path        TEXT,                   -- relative to D:/4 Archives/discord_image_archive/
-    mime_type         TEXT,
-    status            TEXT NOT NULL,
-    http_status       INTEGER,
-    file_size         INTEGER,
-    sha256            TEXT,
-    error             TEXT,
-    attempt_count     INTEGER NOT NULL DEFAULT 0,
-    last_attempt_at   INTEGER NOT NULL,
-    downloaded_at     INTEGER
-);
-CREATE INDEX IF NOT EXISTS downloaded_files_status_ix ON downloaded_files(status);
-CREATE INDEX IF NOT EXISTS downloaded_files_message_ix ON downloaded_files(message_id);
-
-CREATE TABLE IF NOT EXISTS sync_log (
-    run_id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at      INTEGER NOT NULL,
-    finished_at     INTEGER,
-    new_messages    INTEGER,
-    new_attachments INTEGER,
-    new_blobs       INTEGER,
-    notes           TEXT
 );
 """
 
@@ -294,9 +242,9 @@ END;
 """
 
 
-def backup(path: Path | None = None) -> Path:
+def backup(path: Path) -> Path:
     """Snapshot the database next to itself before any DDL runs."""
-    path = Path(path or config.DB_PATH)
+    path = Path(path)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest = path.with_name(f"{path.name}.bak-{stamp}")
     shutil.copyfile(path, dest)
@@ -328,8 +276,8 @@ def create_archive(path: Path | str, *, verbose: bool = True) -> Path:
     """Build an empty but complete archive at `path`.
 
     Everything the viewer needs is here from the start: DHT's tables, our added
-    columns, the people table and the full-text index. Ingest a Meta export or
-    point `sync_dht.py` at it and it fills up.
+    columns, the people table and the full-text index. Ingest a Meta export or a
+    tracker file and it fills up.
     """
     path = Path(path).expanduser().resolve()
     if path.exists():
@@ -347,11 +295,13 @@ def create_archive(path: Path | str, *, verbose: bool = True) -> Path:
     return path
 
 
-def migrate(*, make_backup: bool = True, verbose: bool = True) -> int:
-    path = config.require_db()
+def migrate(archive, *, make_backup: bool = True, verbose: bool = True) -> int:
+    """Bring `archive` up to SCHEMA_VERSION, backing it up first.
 
-    con = db.connect(path)
-    try:
+    Takes the archive rather than finding one, so `smoke_test.py` can migrate a
+    fixture and this machine's own archive is never touched by accident.
+    """
+    with archive.write() as con:
         current = con.execute("PRAGMA user_version").fetchone()[0]
         if current >= SCHEMA_VERSION:
             ensure_schema(con)  # cheap, and heals a partially-applied run
@@ -360,7 +310,7 @@ def migrate(*, make_backup: bool = True, verbose: bool = True) -> int:
             return current
 
         if make_backup:
-            dest = backup(path)
+            dest = backup(archive.path)
             if verbose:
                 print(f"[migrate] backup -> {dest.name} ({dest.stat().st_size:,} B)")
 
@@ -384,9 +334,3 @@ def migrate(*, make_backup: bool = True, verbose: bool = True) -> int:
         if verbose:
             print(f"[migrate] user_version -> {SCHEMA_VERSION}")
         return SCHEMA_VERSION
-    finally:
-        con.close()
-
-
-if __name__ == "__main__":
-    migrate()

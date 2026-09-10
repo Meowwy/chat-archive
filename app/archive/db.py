@@ -1,7 +1,8 @@
 """SQLite connection helpers.
 
 Read paths open the database read-only so the viewer can never corrupt the
-archive; ingest and migration open it read-write.
+archive; ingest and migration open it read-write. Both take the path they are
+given - deciding *which* archive is `Archive`'s job, not this module's.
 """
 
 from __future__ import annotations
@@ -9,8 +10,6 @@ from __future__ import annotations
 import sqlite3
 import urllib.parse
 from pathlib import Path
-
-from . import config
 
 
 def _tune(con: sqlite3.Connection, *, writable: bool) -> sqlite3.Connection:
@@ -24,9 +23,8 @@ def _tune(con: sqlite3.Connection, *, writable: bool) -> sqlite3.Connection:
     return con
 
 
-def connect(path: Path | None = None) -> sqlite3.Connection:
+def connect(path: Path | str) -> sqlite3.Connection:
     """Read-write connection, for migrate and ingest."""
-    path = path or config.require_db()
     return _tune(sqlite3.connect(str(path)), writable=True)
 
 
@@ -40,9 +38,8 @@ def ro_uri(path: Path | str) -> str:
     return f"file:{urllib.parse.quote(Path(path).as_posix(), safe='/:')}?mode=ro"
 
 
-def connect_ro(path: Path | None = None) -> sqlite3.Connection:
+def connect_ro(path: Path | str) -> sqlite3.Connection:
     """Read-only connection, for the API's query endpoints."""
-    path = path or config.require_db()
     return _tune(
         sqlite3.connect(ro_uri(path), uri=True, check_same_thread=False), writable=False
     )

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import db
+from ..vault import Vault
 from . import discord as discord_media
 from .meta import Stats
 
@@ -140,8 +141,13 @@ def _copy_reactions(con: sqlite3.Connection) -> int:
     return _count(con, "main", "message_reactions") - before
 
 
-def ingest(con: sqlite3.Connection, source: Path | str, progress: Progress | None = None) -> Stats:
-    """Copy one .dht file into the connected archive. Owns its transaction.
+def ingest(
+    con: sqlite3.Connection,
+    vault: Vault,
+    source: Path | str,
+    progress: Progress | None = None,
+) -> Stats:
+    """Copy one .dht file into the archive. Owns its transaction.
 
     ATTACH cannot run inside a transaction, so unlike the Meta ingest this
     begins and commits itself; the caller only has to handle the exception.
@@ -185,8 +191,7 @@ def ingest(con: sqlite3.Connection, source: Path | str, progress: Progress | Non
                 stats.dup_msgs = stats.msgs_seen - stats.new_msgs
 
                 # Now that the attachment rows exist, give them their bytes.
-                discord_media.recover_blobs(con, stats, progress, pending_only=True)
-                discord_media.link_downloaded(con, stats, progress)
+                discord_media.recover_blobs(con, vault, stats, progress, pending_only=True)
                 discord_media.backfill_mime(con)
                 con.execute("COMMIT")
             except BaseException:

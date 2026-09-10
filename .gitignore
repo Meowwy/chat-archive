@@ -1,13 +1,9 @@
 # --- the archive itself never leaves this machine ------------------------
 # The app is pluggable: it asks for a database on first run, so none of this
-# needs to be in the repository. See "First run" in README.md.
-Archives/*.sqlite
-Archives/*.sqlite-*
-Archives/*.sqlite.bak-*
-Archives/*.dht
-Archives/*.dht-*
-Archives/images/
-Archives/_tmp/
+# needs to be in the repository. See "First run" in README.md. Nothing in
+# Archives/ is tracked: it is where an archive, its media and the compiled
+# Czech dictionary land by default on this machine.
+Archives/
 
 # Chat exports (Facebook / Instagram), and anything unpacked beside them
 your_facebook_activity/

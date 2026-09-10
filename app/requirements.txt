@@ -1,2 +1,5 @@
 fastapi>=0.115
 uvicorn[standard]>=0.32
+
+# fastapi.testclient (used by smoke_test.py) needs it; not a base fastapi dep
+httpx>=0.23

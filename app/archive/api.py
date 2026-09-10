@@ -17,7 +17,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, czech, db, migrate as migrate_mod, picker, query as query_mod, vault
+from . import config, db, picker, query as query_mod
+from .archive import AVATAR_SUFFIXES, Archive
 from .ingest.detect import detect as detect_exports
 from .ingest import people as people_mod
 from .ingest import runner
@@ -69,23 +70,49 @@ app = FastAPI(
     default_response_class=IdSafeJSONResponse,
 )
 
-_ro: sqlite3.Connection | None = None
+# The one piece of session state the server keeps: which archive is open. It
+# lives here, in the HTTP layer, because "connect a different database" is an
+# HTTP action - nothing underneath this module knows or asks which archive it
+# is working on; it is handed one.
+_archive: Archive | None = None
+_no_archive: str = ""
+_resolved = False
 
 
-def ro() -> sqlite3.Connection:
-    global _ro
-    if _ro is None:
+def connected() -> Archive | None:
+    """The open archive, resolving this machine's on the first request."""
+    global _archive, _no_archive, _resolved
+    if not _resolved:
+        _resolved = True
         try:
-            _ro = db.connect_ro()
+            _archive = Archive.connected()
         except config.NoDatabase as exc:
-            # 503, not 500: nothing is broken, there is just no archive yet.
-            # The web UI turns this into the "Connect a database" screen.
-            raise HTTPException(503, str(exc)) from exc
-    return _ro
+            _archive, _no_archive = None, str(exc)
+    return _archive
+
+
+def current() -> Archive:
+    """The open archive, or a 503 telling the UI to ask for one.
+
+    503, not 500: nothing is broken, there is just no archive yet. The web UI
+    turns this into the "Connect a database" screen.
+    """
+    found = connected()
+    if found is None:
+        raise HTTPException(503, _no_archive)
+    return found
+
+
+def use(archive: Archive) -> None:
+    """Serve this archive from now on."""
+    global _archive, _no_archive, _resolved
+    if _archive is not None and _archive is not archive:
+        _archive.close()
+    _archive, _no_archive, _resolved = archive, "", True
 
 
 def rows(sql: str, params: tuple = ()) -> list[dict]:
-    return [dict(r) for r in ro().execute(sql, params)]
+    return [dict(r) for r in current().read().execute(sql, params)]
 
 
 # ---------------------------------------------------------------- threads
@@ -425,7 +452,7 @@ def search(
     offset: int = 0,
 ) -> dict:
     try:
-        built = query_mod.build_query(q, czech.lexicon())
+        built = query_mod.build_query(q, current().lexicon)
     except query_mod.QueryError as exc:
         raise HTTPException(400, str(exc)) from exc
     expression = built.expression
@@ -458,7 +485,7 @@ def search(
     clause = " AND ".join(where)
 
     try:
-        total = ro().execute(
+        total = current().read().execute(
             f"""
             SELECT COUNT(*) FROM messages_fts
             JOIN messages m ON m.message_id = messages_fts.rowid
@@ -532,7 +559,7 @@ def stats_months(threads: str, q: str | None = None) -> dict:
     expression, widened = "", []
     if q and q.strip():
         try:
-            built = query_mod.build_query(q, czech.lexicon())
+            built = query_mod.build_query(q, current().lexicon)
         except query_mod.QueryError as exc:
             raise HTTPException(400, str(exc)) from exc
         expression = built.expression
@@ -580,6 +607,7 @@ def stats_months(threads: str, q: str | None = None) -> dict:
 def media(sha256: str):
     if not re.fullmatch(r"[0-9a-f]{64}", sha256):
         raise HTTPException(400, "bad hash")
+    vault = current().vault
     found = rows(
         "SELECT name, type, local_path FROM attachments "
         "WHERE sha256 = ? AND local_path IS NOT NULL LIMIT 1",
@@ -587,12 +615,9 @@ def media(sha256: str):
     )
     relpath = found[0]["local_path"] if found else None
     if relpath is None:
-        # Avatars live in the vault but are not attachments; probe directly.
-        for suffix in (".webp", ".png", ".jpg", ".gif", ".jpeg"):
-            candidate = vault.relpath_for(sha256, suffix)
-            if vault.exists(candidate):
-                relpath = candidate
-                break
+        # Avatars live in the vault but are not attachments, so there is no row
+        # naming the file - the vault guesses the suffix instead.
+        relpath = vault.find(sha256, AVATAR_SUFFIXES)
     if relpath is None or not vault.exists(relpath):
         raise HTTPException(404, "not in vault")
 
@@ -610,24 +635,13 @@ def media(sha256: str):
 # the mapping lives in the archive file and travels with it.
 
 
-def _reset_reader() -> None:
-    """Drop the cached read-only connection so the next read sees the write."""
-    global _ro
-    if _ro:
-        _ro.close()
-        _ro = None
-
-
 def _people_write(action):
-    con = db.connect()
-    try:
-        result = action(con)
-    except people_mod.PeopleError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    finally:
-        con.close()
-    _reset_reader()
-    return result
+    """Run one people edit. `write()` refreshes the reader on the way out."""
+    with current().write() as con:
+        try:
+            return action(con)
+        except people_mod.PeopleError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
 
 def _ints(values) -> list[int]:
@@ -639,7 +653,7 @@ def _ints(values) -> list[int]:
 
 @app.get("/api/people")
 def get_people() -> dict:
-    con = ro()
+    con = current().read()
     people = [
         dict(r)
         for r in con.execute(
@@ -715,7 +729,11 @@ def link_identities(payload: dict) -> dict:
 
 
 def _describe(path: Path | None) -> dict:
-    """What we can say about a database file without trusting it."""
+    """What we can say about a database file without trusting it.
+
+    Used on files the app has *not* connected to - the one just chosen in a
+    dialog - so it opens its own read-only connection rather than an Archive.
+    """
     if path is None:
         return {"path": None, "exists": False}
     info = {"path": str(path), "exists": path.is_file()}
@@ -739,11 +757,13 @@ def _describe(path: Path | None) -> dict:
 @app.get("/api/db")
 def db_status() -> dict:
     """Which archive is connected, if any."""
+    archive = connected()
     return {
-        "connected": config.is_connected(),
-        "vault_path": str(config.VAULT_DIR),
+        "connected": archive is not None,
+        # No archive means no vault yet - the connect screen decides where both go.
+        "vault_path": str(archive.vault.root) if archive else None,
         "settings_path": str(config.SETTINGS_FILE),
-        **_describe(config.DB_PATH),
+        **_describe(archive.path if archive else None),
     }
 
 
@@ -769,29 +789,34 @@ def db_connect(payload: dict) -> dict:
     path = Path(str(raw).strip('"')).expanduser()
     try:
         if (payload or {}).get("create"):
-            migrate_mod.create_archive(path, verbose=False)
-        elif not path.is_file():
-            raise HTTPException(400, f"No such database file: {path}")
+            archive = Archive.create(path, verbose=False)
         else:
+            archive = Archive.open(path)
             # An archive made by an older version, or a raw DHT mirror, is
             # missing our columns - add them rather than refusing to open it.
-            con = db.connect(path)
-            try:
-                migrate_mod.ensure_schema(con)
-            finally:
-                con.close()
-        config.connect_db(path)
+            archive.upgrade()
+        archive.remember()
     except FileExistsError as exc:
         raise HTTPException(400, str(exc)) from exc
     except config.NoDatabase as exc:
         raise HTTPException(400, str(exc)) from exc
     except sqlite3.Error as exc:
         raise HTTPException(400, f"That file is not a usable archive: {exc}") from exc
-    _reset_reader()
+    use(archive)
     return db_status()
 
 
 # ----------------------------------------------------------------- ingest
+
+
+def _detect(path: str) -> dict:
+    """What is importable at `path`, or a message saying why nothing is."""
+    archive = connected()
+    try:
+        sources = detect_exports(path, connected=archive.path if archive else None)
+    except ValueError as exc:
+        return {"path": path, "sources": [], "error": str(exc)}
+    return {"path": path, "sources": [source.summary() for source in sources]}
 
 
 def _picked(ask) -> dict:
@@ -802,10 +827,7 @@ def _picked(ask) -> dict:
         raise HTTPException(500, str(exc)) from exc
     if not path:
         return {"path": None, "sources": []}
-    try:
-        return {"path": path, "sources": [s.summary() for s in detect_exports(path)]}
-    except ValueError as exc:
-        return {"path": path, "sources": [], "error": str(exc)}
+    return _detect(path)
 
 
 @app.post("/api/ingest/pick-folder")
@@ -823,10 +845,7 @@ def inspect(payload: dict) -> dict:
     path = (payload or {}).get("path")
     if not path:
         raise HTTPException(400, "path required")
-    try:
-        return {"path": path, "sources": [s.summary() for s in detect_exports(path)]}
-    except ValueError as exc:
-        return {"path": path, "sources": [], "error": str(exc)}
+    return _detect(path)
 
 
 @app.post("/api/ingest/run")
@@ -835,13 +854,13 @@ def run_ingest(payload: dict):
     if not path:
         raise HTTPException(400, "path required")
 
+    archive = current()
+
     def stream() -> Iterator[str]:
-        for event in runner.stream_ingest(path):
+        # stream_ingest holds the write connection for the run and drops the
+        # cached reader when it closes, so the next query sees the new messages.
+        for event in runner.stream_ingest(archive, path):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        global _ro
-        if _ro:
-            _ro.close()
-            _ro = None
 
     return StreamingResponse(
         stream(),
@@ -852,15 +871,7 @@ def run_ingest(payload: dict):
 
 @app.get("/api/ingest/history")
 def ingest_history() -> dict:
-    return {
-        "ingest": rows(
-            "SELECT * FROM ingest_log ORDER BY run_id DESC LIMIT 50"
-        ),
-        "sync": rows(
-            "SELECT run_id, started_at, finished_at, new_messages, new_attachments, new_blobs "
-            "FROM sync_log ORDER BY run_id DESC LIMIT 20"
-        ),
-    }
+    return {"ingest": rows("SELECT * FROM ingest_log ORDER BY run_id DESC LIMIT 50")}
 
 
 @app.get("/api/stats")
@@ -881,8 +892,8 @@ def stats() -> dict:
         "platforms": platforms,
         "total": sum(p["messages"] for p in platforms),
         "media": media_stats,
-        "db_path": str(config.DB_PATH),
-        "vault_path": str(config.VAULT_DIR),
+        "db_path": str(current().path),
+        "vault_path": str(current().vault.root),
     }
 
 

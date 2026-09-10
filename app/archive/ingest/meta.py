@@ -22,9 +22,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .. import noise, vault
+from .. import noise
 from ..ids import demojibake, media_entries, media_type, message_source_key, synth_id
 from . import secure
+from ..vault import Vault
 from .detect import ExportSource
 
 Progress = Callable[[str], None]
@@ -57,14 +58,18 @@ class Stats:
 
 
 class MetaIngest:
+    """One export folder, read into the archive's tables and media vault."""
+
     def __init__(
         self,
         con: sqlite3.Connection,
         source: ExportSource,
+        vault: Vault,
         progress: Progress | None = None,
     ):
         self.con = con
         self.source = source
+        self.vault = vault
         self.platform = source.platform
         self.progress = progress or (lambda _message: None)
         self.stats = Stats()
@@ -105,7 +110,7 @@ class MetaIngest:
             "SELECT sha256, local_path FROM attachments WHERE attachment_id = ?",
             (attachment_id,),
         ).fetchone()
-        if row and row["sha256"] and row["local_path"] and vault.exists(row["local_path"]):
+        if row and row["sha256"] and row["local_path"] and self.vault.exists(row["local_path"]):
             self.stats.dup_media += 1
             return attachment_id, row["sha256"], row["local_path"]
 
@@ -117,7 +122,7 @@ class MetaIngest:
             sha256 = relpath = None
             size = 0
         else:
-            sha256, relpath, size, was_new = vault.put(source_file)
+            sha256, relpath, size, was_new = self.vault.put(source_file)
             if was_new:
                 self.stats.new_media += 1
             else:

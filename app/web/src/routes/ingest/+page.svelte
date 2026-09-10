@@ -187,16 +187,6 @@
 						<td class:bad={run.status !== 'ok'}>{run.status}</td>
 					</tr>
 				{/each}
-				{#each history.sync as run (`s${run.run_id}`)}
-					<tr class="sync">
-						<td>Discord (sync_dht)</td>
-						<td>{formatDayShort(run.started_at)}</td>
-						<td class="n">{formatCount(run.new_messages)}</td>
-						<td class="n">—</td>
-						<td class="n">{formatCount(run.new_attachments)}</td>
-						<td>ok</td>
-					</tr>
-				{/each}
 			</tbody>
 		</table>
 	{/if}
@@ -330,10 +320,6 @@
 	.n {
 		text-align: right;
 		font-variant-numeric: tabular-nums;
-	}
-
-	tr.sync td {
-		color: var(--muted);
 	}
 
 	.bad {

@@ -31,7 +31,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, db
+from . import db
 
 SOURCE_FILES = ("words.txt", "lemmas.txt", "word-lemma.u24")
 
@@ -145,9 +145,24 @@ class Lexicon:
     """Read-only view of the built dictionary."""
 
     def __init__(self, path: Path):
-        self.path = path
-        self._con = sqlite3.connect(db.ro_uri(path), uri=True, check_same_thread=False)
+        self.path = Path(path)
+        self._con = sqlite3.connect(db.ro_uri(self.path), uri=True, check_same_thread=False)
         self._cache: dict[str, Expansion | None] = {}
+
+    @classmethod
+    def open(cls, path: Path | None) -> "Lexicon | None":
+        """The dictionary at `path`, or None when it has not been built.
+
+        Search has to keep working without it - it simply stops widening and
+        matches literal words, which is what it did before any of this existed.
+        So "missing" is an answer here, not an error.
+        """
+        if path is None or not Path(path).is_file():
+            return None
+        try:
+            return cls(path)
+        except sqlite3.Error:
+            return None
 
     def expand(self, word: str) -> Expansion | None:
         """Every form sharing this word's lemma and polarity, or None if unknown.
@@ -185,25 +200,5 @@ class Lexicon:
         self._cache[key] = result
         return result
 
-
-_lexicon: Lexicon | None = None
-_lexicon_path: Path | None = None
-
-
-def lexicon() -> Lexicon | None:
-    """The dictionary, or None when it has not been built.
-
-    Search has to keep working without it - it simply stops widening and
-    matches literal words, which is what it did before any of this existed.
-    """
-    global _lexicon, _lexicon_path
-    path = config.LEXICON_PATH
-    if _lexicon is not None and _lexicon_path == path:
-        return _lexicon
-    _lexicon, _lexicon_path = None, path
-    if path is not None and path.is_file():
-        try:
-            _lexicon = Lexicon(path)
-        except sqlite3.Error:
-            _lexicon = None
-    return _lexicon
+    def close(self) -> None:
+        self._con.close()

@@ -23,7 +23,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import config, db
+from .. import db
 from . import secure
 
 MARKERS = {
@@ -217,15 +217,22 @@ def _find_markers(path: Path) -> list[Path]:
     return unique
 
 
-def detect(path: str | Path) -> list[ExportSource | DhtSource]:
+def detect(
+    path: str | Path, *, connected: Path | str | None = None
+) -> list[ExportSource | DhtSource]:
     """Return every importable source found at (or around) `path`.
+
+    `connected` is the archive being imported *into*, if there is one. An
+    archive is a SQLite database with all of DHT's tables, so it would happily
+    detect as a tracker file and import into itself; naming it here is what
+    turns that into a clear refusal.
 
     Raises ValueError with an actionable message when nothing usable is found.
     """
     path = Path(path).expanduser().resolve()
 
     if path.is_file():
-        if config.DB_PATH is not None and path == Path(config.DB_PATH).resolve():
+        if connected is not None and path == Path(connected).resolve():
             raise ValueError("That file is the archive you are connected to, not an import.")
         if is_dht(path):
             return [DhtSource(path=path)]

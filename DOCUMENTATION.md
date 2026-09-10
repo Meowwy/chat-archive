@@ -27,10 +27,14 @@ point it at an existing `.sqlite` archive, or create an empty one and import you
 it. The same job from a terminal:
 
 ```
-py -m archive db C:/archives/chat_archive.sqlite --create   # start an empty archive
-py -m archive db C:/archives/chat_archive.sqlite            # connect to an existing one
-py -m archive db                                            # show what is connected
+py -m archive db C:/archives/chatArchive.sqlite --create   # start an empty archive
+py -m archive db C:/archives/chatArchive.sqlite            # connect to an existing one
+py -m archive db                                           # show what is connected
 ```
+
+A new archive is called `chatArchive.sqlite` unless you name it something else, and its media
+vault is created beside it. There is no built-in default location: until you connect one, the app
+has no archive and says so.
 
 The choice is remembered in `app/settings.local.json` (untracked). `ARCHIVE_DB` and
 `ARCHIVE_VAULT` override it, which is how you keep several archives side by side. A database
@@ -53,8 +57,8 @@ py -m archive ingest "D:\path\to\your_instagram_activity"
 Either way it is safe to re-run: messages already in the archive are skipped, and media that is
 already stored is not copied again.
 
-To pull in new Discord messages, run the existing backup workflow in `Archives/` (see
-`Archives/README.md`), then optionally `py -m archive discord-media`.
+To pull in new Discord messages, scrape more with Discord History Tracker and import its `.dht`
+file again — only what is new is added.
 
 ## Commands
 
@@ -69,7 +73,7 @@ To pull in new Discord messages, run the existing backup workflow in `Archives/`
 | `py -m archive discord-media` | Recover Discord attachments that exist locally |
 | `py -m archive setup` | `migrate` + `discord-media` |
 | `py -m archive people` | List every identity and the person it belongs to |
-| `py smoke_test.py` | End-to-end checks (164 assertions) |
+| `py smoke_test.py` | End-to-end checks against a throwaway archive (200 assertions) |
 
 ## How it fits together
 
@@ -330,9 +334,6 @@ Added to existing tables: `platform` (all), `source_key` + `is_unsent` (messages
 New tables: `people`, `channel_participants`, `message_reaction_actors` (Meta records reactions
 per actor; DHT only aggregates), `ingest_log`, and the `messages_fts` index.
 
-`Archives/sync_dht.py` is now a two-line convenience wrapper around the same importer, kept only
-because the habit of running it from that folder predates the Import page.
-
 ## Development
 
 ```
@@ -345,6 +346,41 @@ npm run build    # writes app/web/build, which `py -m archive serve` then serves
 Stack: FastAPI + SQLite (stdlib `sqlite3`, no ORM) and SvelteKit 5 with `adapter-static`, plus
 Chart.js for the Stats lines. No CDN dependencies — everything is bundled into the build, and it
 works with the machine offline.
+
+### One archive, handed around
+
+A database, the media vault whose files its `attachments` rows point at, and the Czech dictionary
+always travel together, so one object owns all three:
+
+```python
+archive = Archive.connected()      # what this machine is set up to use
+archive = Archive.open(path)       # that file, plainly
+archive = Archive.create(path)     # a new, empty, complete archive
+
+archive.read()                     # cached read-only connection
+with archive.write() as con: ...   # read-write for one job
+```
+
+Nothing below `archive.py` asks where the archive is — the vault is built with its directory, the
+importers are given it, `config.py` only answers *which archive should this machine use?* and
+answers it as a value. Reads and writes are deliberately asymmetric: `read()` hands back one
+long-lived read-only connection, so browsing can never modify the archive, while `write()` opens
+one for the duration of a job and drops the cached reader on the way out — so the next read sees
+the write and nobody has to remember to invalidate anything.
+
+Which archive is open is session state, so it lives in `api.py`, the one place where "connect a
+different database" is a thing that happens.
+
+### The checks build their own archive
+
+`py smoke_test.py` does not read your archive. `fixture.py` writes a Facebook export, an Instagram
+export, a Messenger encrypted-chat download and a `.dht` file into a temp folder — with real
+mojibake, Czech inflection, Instagram's reaction pseudo-messages and a media URI Meta failed to
+export — ingests all four, links the identities into people, and hands back an `Archive`. Every
+check runs against that, so they pass on a fresh clone and leave nothing behind.
+
+The Czech dictionary is the one optional part: it is derived data, so checks that need it are
+skipped with a note rather than failed, exactly as search itself degrades without it.
 
 ## Backups
 

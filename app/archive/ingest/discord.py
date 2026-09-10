@@ -3,12 +3,9 @@
 Discord CDN links are signed and expire roughly 24h after they are issued, so
 the overwhelming majority of scraped attachments now return HTTP 404 and are
 gone for good. This module deliberately makes no network calls; it only
-recovers what already exists locally:
-
-1. `download_blobs` - attachment and avatar bytes embedded in the DHT file
-   itself. Free, offline, and always works.
-2. The successful downloads produced by download_images.py / download_files.py,
-   which live on the external drive.
+recovers what already exists locally: the attachment and avatar bytes the
+tracker embedded in the `.dht` file itself, in its `download_blobs` table. That
+is free, offline, and the only copy of a Discord attachment that survives.
 
 Everything else keeps its `attachments` row (name, type, size, dimensions, dead
 URL) so the viewer can render an informative placeholder rather than a broken
@@ -23,7 +20,7 @@ import sqlite3
 from pathlib import Path
 from typing import Callable
 
-from .. import config, vault
+from ..vault import Vault
 from .meta import Stats
 
 Progress = Callable[[str], None]
@@ -51,6 +48,7 @@ WHERE EXISTS (
 
 def recover_blobs(
     con: sqlite3.Connection,
+    vault: Vault,
     stats: Stats,
     progress: Progress,
     *,
@@ -98,87 +96,6 @@ def recover_blobs(
             pass
 
 
-def link_downloaded(con: sqlite3.Connection, stats: Stats, progress: Progress) -> None:
-    """Fold previously downloaded attachments into the vault."""
-    roots = [root for root in config.LEGACY_DISCORD_MEDIA if root.is_dir()]
-    if not roots:
-        progress("[discord] no legacy download folders present, skipping")
-        return
-
-    for table in ("downloaded_images", "downloaded_files"):
-        rows = con.execute(
-            f"""
-            SELECT d.attachment_id, d.local_path, a.name
-            FROM {table} d
-            JOIN attachments a ON a.attachment_id = d.attachment_id
-            WHERE d.status = 'success' AND d.local_path IS NOT NULL
-              AND (a.sha256 IS NULL OR a.local_path IS NULL)
-            """
-        ).fetchall()
-        progress(f"[discord] {table}: {len(rows)} successful download(s) to fold in")
-
-        for row in rows:
-            source = _first_existing(roots, row["local_path"])
-            stats.media_seen += 1
-            if source is None:
-                stats.missing_media += 1
-                if len(stats.missing_examples) < 5:
-                    stats.missing_examples.append(row["local_path"])
-                continue
-            sha256, relpath, _size, was_new = vault.put(source)
-            stats.new_media += 1 if was_new else 0
-            stats.dup_media += 0 if was_new else 1
-            con.execute(
-                "UPDATE attachments SET sha256 = ?, local_path = ? WHERE attachment_id = ?",
-                (sha256, relpath, row["attachment_id"]),
-            )
-
-    _link_loose_files(con, stats, progress)
-
-
-def _first_existing(roots: list[Path], relative: str) -> Path | None:
-    for root in roots:
-        candidate = root / relative
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-_LOOSE_RE = re.compile(r"msg(\d+)_att(\d+)_", re.I)
-
-
-def _link_loose_files(con: sqlite3.Connection, stats: Stats, progress: Progress) -> None:
-    """Pick up files named by an older script: msg<id>_att<id>_<kind>.<ext>."""
-    folder = config.ARCHIVES_DIR / "images"
-    if not folder.is_dir():
-        return
-    found = 0
-    for path in folder.rglob("*"):
-        if not path.is_file():
-            continue
-        match = _LOOSE_RE.match(path.name)
-        if not match:
-            continue
-        attachment_id = int(match.group(2))
-        row = con.execute(
-            "SELECT sha256, local_path FROM attachments WHERE attachment_id = ?",
-            (attachment_id,),
-        ).fetchone()
-        if row is None or (row["sha256"] and row["local_path"]):
-            continue
-        sha256, relpath, _size, was_new = vault.put(path)
-        stats.media_seen += 1
-        stats.new_media += 1 if was_new else 0
-        stats.dup_media += 0 if was_new else 1
-        con.execute(
-            "UPDATE attachments SET sha256 = ?, local_path = ? WHERE attachment_id = ?",
-            (sha256, relpath, attachment_id),
-        )
-        found += 1
-    if found:
-        progress(f"[discord] linked {found} loose file(s) from Archives/images")
-
-
 def backfill_mime(con: sqlite3.Connection) -> int:
     """Fill in missing attachment MIME types from the filename."""
     rows = con.execute(
@@ -196,10 +113,10 @@ def backfill_mime(con: sqlite3.Connection) -> int:
     return updated
 
 
-def run(con: sqlite3.Connection, progress: Progress | None = None) -> Stats:
+def run(con: sqlite3.Connection, vault: Vault, progress: Progress | None = None) -> Stats:
+    """Everything `py -m archive discord-media` does: a full offline sweep."""
     progress = progress or (lambda _message: None)
     stats = Stats()
-    recover_blobs(con, stats, progress)
-    link_downloaded(con, stats, progress)
+    recover_blobs(con, vault, stats, progress)
     backfill_mime(con)
     return stats

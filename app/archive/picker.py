@@ -12,6 +12,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from . import config
+
 # The path comes back as raw UTF-8 bytes rather than through print(). Windows
 # consoles are cp1250 here, so a printed "G:\\Můj disk" would reach the parent
 # as "G:\\MĹŻj disk" - a path that does not exist.
@@ -72,6 +74,6 @@ def ask_new_database(timeout: int = 300) -> str | None:
     """Ask where to put a new, empty archive database."""
     return _ask(
         'asksaveasfilename(title="Create a new archive", defaultextension=".sqlite", '
-        f'initialfile="chat_archive.sqlite", filetypes={_DB_TYPES})',
+        f'initialfile="{config.NEW_DB_NAME}", filetypes={_DB_TYPES})',
         timeout,
     )

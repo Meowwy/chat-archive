@@ -2,6 +2,11 @@
 
 A run either completes and commits, or rolls back entirely and records the
 failure - the archive is never left half-updated.
+
+Everything here takes the `Archive` it is filling. The connection is passed
+separately because the transaction is the runner's business, not the archive's:
+Meta sources are wrapped in one BEGIN each, while the .dht importer has to own
+its own (ATTACH cannot run inside a transaction).
 """
 
 from __future__ import annotations
@@ -12,7 +17,9 @@ import traceback
 from pathlib import Path
 from typing import Callable, Iterator
 
-from .. import db, migrate
+from .. import migrate
+from ..archive import Archive
+from ..vault import Vault
 from . import discord as discord_ingest
 from . import dht
 from .detect import DhtSource, ExportSource, detect
@@ -69,6 +76,7 @@ def _rollback(con: sqlite3.Connection) -> None:
 def ingest_source(
     con: sqlite3.Connection,
     source: ExportSource | DhtSource,
+    vault: Vault,
     progress: Progress | None = None,
 ) -> Stats:
     """Ingest one detected source inside a single transaction."""
@@ -79,10 +87,10 @@ def ingest_source(
         if isinstance(source, DhtSource):
             # ATTACH is illegal inside a transaction, so that importer runs its
             # own BEGIN/COMMIT rather than being wrapped in one here.
-            stats = dht.ingest(con, source.path, progress)
+            stats = dht.ingest(con, vault, source.path, progress)
         else:
             con.execute("BEGIN")
-            stats = MetaIngest(con, source, progress).run()
+            stats = MetaIngest(con, source, vault, progress).run()
             con.execute("COMMIT")
     except BaseException as exc:
         _rollback(con)
@@ -93,55 +101,54 @@ def ingest_source(
     return stats
 
 
-def ingest_discord_media(con: sqlite3.Connection, progress: Progress | None = None) -> Stats:
+def ingest_discord_media(archive: Archive, progress: Progress | None = None) -> Stats:
+    """Recover every Discord attachment that exists locally. Makes no network calls."""
     progress = progress or (lambda _message: None)
-    run_id = _open_log(con, "discord_media", str(Path(con.execute("PRAGMA database_list").fetchone()[2])))
     stats = Stats()
-    try:
-        con.execute("BEGIN")
-        stats = discord_ingest.run(con, progress)
-        con.execute("COMMIT")
-    except BaseException:
-        con.execute("ROLLBACK")
-        _close_log(con, run_id, stats, "failed", traceback.format_exc(limit=5))
-        raise
-    _close_log(con, run_id, stats, "ok")
+    with archive.write() as con:
+        migrate.ensure_schema(con)
+        run_id = _open_log(con, "discord_media", str(archive.path))
+        try:
+            con.execute("BEGIN")
+            stats = discord_ingest.run(con, archive.vault, progress)
+            con.execute("COMMIT")
+        except BaseException:
+            _rollback(con)
+            _close_log(con, run_id, stats, "failed", traceback.format_exc(limit=5))
+            raise
+        _close_log(con, run_id, stats, "ok")
     return stats
 
 
-def ingest_path(path: str | Path, progress: Progress | None = None) -> list[tuple[str, Stats]]:
-    """Detect and ingest every export or tracker file at `path`."""
+def ingest_path(archive: Archive, path: str | Path, progress: Progress | None = None) -> list[tuple[str, Stats]]:
+    """Detect and ingest every export or tracker file at `path` into `archive`."""
     progress = progress or (lambda _message: None)
-    sources = detect(path)
-    con = db.connect()
-    try:
+    sources = detect(path, connected=archive.path)
+    with archive.write() as con:
         migrate.ensure_schema(con)
         results = []
         for source in sources:
             progress(f"[ingest] {source.label}: {source.path}")
-            results.append((source.kind, ingest_source(con, source, progress)))
+            results.append((source.kind, ingest_source(con, source, archive.vault, progress)))
         return results
-    finally:
-        con.close()
 
 
-def stream_ingest(path: str | Path) -> Iterator[dict]:
+def stream_ingest(archive: Archive, path: str | Path) -> Iterator[dict]:
     """Generator form used by the API's progress stream."""
     try:
-        sources = detect(path)
+        sources = detect(path, connected=archive.path)
     except ValueError as exc:
         yield {"event": "error", "message": str(exc)}
         return
 
     yield {"event": "detected", "sources": [source.summary() for source in sources]}
 
-    con = db.connect()
-    try:
+    with archive.write() as con:
         migrate.ensure_schema(con)
         for source in sources:
             messages: list[str] = []
             try:
-                stats = ingest_source(con, source, messages.append)
+                stats = ingest_source(con, source, archive.vault, messages.append)
             except Exception as exc:  # noqa: BLE001 - surfaced to the UI
                 yield {"event": "error", "message": f"{source.label}: {exc}"}
                 return
@@ -154,5 +161,3 @@ def stream_ingest(path: str | Path) -> Iterator[dict]:
                 "missing_examples": stats.missing_examples,
             }
         yield {"event": "done"}
-    finally:
-        con.close()
