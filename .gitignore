@@ -10,6 +10,9 @@ your_facebook_activity/
 your_instagram_activity/
 *_activity/
 
+# Discord's official data package - see tools/README.md
+discord_export/
+
 # Messenger's encrypted-chat download unzips to these two, side by side
 /messages/
 /media/
