@@ -1,12 +1,11 @@
 # Chat Archive
 
-Read and search your Discord, Facebook Messenger, Instagram and Microsoft Teams conversations in one
-place, **offline on device**.
+Read and search your Discord, Instagram, Facebook Messenger and Microsoft Teams conversations in one place, **offline on device**.
 
 ## What is this tool for:
 
-- It processes your exported chat conversations and creates local sqlite database.
-- Then enables to view the content of the local database in browser.
+- It processes your exported chat conversations including media and creates local sqlite database.
+- Then enables to view the content of the local database and the saved media in browser.
 - Has full-text search and the ability to link conversations with one person across platforms.
 - Simple statistics for received / sent messages and for used words.
 
@@ -89,28 +88,26 @@ products** → click on **Teams** → set the export and confirm. Direct link:
 [teams.live.com/dataexport](https://teams.live.com/dataexport). There is also a video walkthrough:
 [youtu.be/hsB08IcyjD8](https://youtu.be/hsB08IcyjD8?si=L3nyDUnihFUMsFrF).
 
-Microsoft emails a link when the export is ready, and what downloads is a single **`.tar`** holding
-`messages.json` beside a flat `media/` folder. **You do not have to unpack it.** These exports get
-large — mostly video — and unpacking costs that much disk again before a single message reaches the
-archive, so point the app straight at the `.tar` and it reads what it needs from inside. If you have
-already unpacked it, pick the folder instead; both work and import identically.
+The export is a single **`.tar`** folder. You do not have to unpack it, just point the app straight at the `.tar` and it reads what it needs from inside.
 
-> Teams does not put everything in the download. Some attachments are referenced by the messages
-> and their bytes are simply absent: voice messages, ordinary files such as PDFs and spreadsheets,
-> and a share of the older photos and videos. Those show as an unavailable attachment, with the
-> message text completely intact.
+> Microsoft Teams export does not include everything.
+> It omits voice messages and ordinary files such as PDFs and spreadsheets.
 
 ### Discord
 
-Discord has no official export, so use **[Discord History Tracker](https://dht.chylex.com/)** — a
-free, open-source tool that saves your history to a `.dht` file (SQLite) as you browse. Unfortunately images and file stored on discord servers are unreachable by this scraping tool, Discord's CDN links are signed and expire in several hours after they are issued, so anything not downloaded while it is fresh is gone for good.
+Discord export only exports your messages from the DMs and channels you interacted in, so it is only useful to get the working media links for scraping them.
+
+To get all messages from your DMs, use **[Discord History Tracker](https://dht.chylex.com/)** — a
+free, open-source tool that saves your history to a `.dht` file (SQLite) as you browse. Unfortunately images and file stored on discord servers are unreachable by this scraping tool, Discord's CDN links are signed and expire in several hours after they are issued, so anything not downloaded while it is fresh is unreachable from outside the official app and web application.
 
 The `.dht` file it writes is imported like any other export — leave it wherever the tracker keeps
 it. Re-import it whenever you have scraped more; only new messages are added.
 
+You can then use the tools in `/tools` directory of this project to scrape at least your media from the official export.
+
 ## Importing
 
-Open the **Import** page and press **Choose a folder…** for an unzipped Facebook, Instagram,
+Open the **Import** page and press **Choose a folder…** for an **unzipped** Facebook, Instagram,
 encrypted-Messenger or Teams export, or **Choose a file…** for Discord's `.dht` or a Teams `.tar`.
 Check what was detected, and import. Or from a terminal:
 
@@ -122,8 +119,78 @@ py -m archive ingest "C:/path/to/teams_export.tar"  # or the folder, if you unpa
 py -m archive ingest "C:/path/to/discord_archive.dht"
 ```
 
-Either way it is safe to re-run: anything already in the archive is skipped. Once imported, media has been copied into the archive's
-vault, so you can delete the export folder.
+It is safe to re-run: anything already in the archive is skipped.
+Once imported, media has been copied into the archive's vault, so you can delete the export folder.
+
+## Where the archive lives
+
+An archive consists of two things:
+
+- **the database** — one `.sqlite` file holding every message, person and conversation
+- **the media vault** — a folder holding every image, video, voice message and avatar, each file
+  named after the hash of its own contents and filed in one of 256 subfolders
+
+When you start an archive, the vault is created beside the database, so the whole thing is one
+folder you can pick up and carry:
+
+```
+MyArchive/
+  chatArchive.sqlite      the database
+  chat_media_vault/       the media, in folders 00 … ff
+```
+
+Which archive this machine uses is remembered in `app/settings.local.json` — two paths and nothing
+else. It is deliberately untracked, because those paths only make sense on the machine that wrote
+them.
+
+### Backing it up, or moving it to another drive
+
+Copy **both** parts, and copy them together:
+
+1. **Stop the server first.** The database runs in WAL mode, so messages that are already saved can
+   still be sitting in the `.sqlite-wal` file next to it. Copying the `.sqlite` on its own while the
+   app is running can leave them behind. Either shut the server down, or copy the `.sqlite`, `-wal`
+   and `-shm` files as a set.
+2. **Copy the database and the vault from the same moment.** Messages point into the vault by
+   content hash, so a database newer than its vault gives you messages whose media is missing. The
+   other way round is harmless — a vault ahead of the database just holds a few unused files.
+
+Old copies of the database are worth keeping for a while, but they are complete archives in their
+own right rather than increments — each one is as large as the archive was on the day it was made.
+
+### Reconnecting after a fresh clone
+
+Point the app at the `.sqlite` file:
+
+```
+py -m archive db "D:/Backups/MyArchive/chatArchive.sqlite"
+```
+
+or run `py -m archive serve`, open **Connect a database** and press **Choose an existing archive…**.
+Either way the choice is written to `app/settings.local.json`, and the app opens that archive from
+then on.
+
+If the vault sits beside the database, as it does by default, it is found along with it and there is
+nothing else to do. **If you keep the vault somewhere else** — a different drive, say — connecting
+looks for it beside the database and finds nothing, so name it yourself. Either set the environment
+variable:
+
+```
+set ARCHIVE_VAULT=E:/media/chat_media_vault     # Windows; export on macOS and Linux
+```
+
+or write `app/settings.local.json` by hand before starting the app:
+
+```json
+{
+  "db_path": "D:/Backups/MyArchive/chatArchive.sqlite",
+  "vault_path": "E:/media/chat_media_vault"
+}
+```
+
+Three environment variables override the remembered settings whenever they are set: `ARCHIVE_DB`,
+`ARCHIVE_VAULT` and `ARCHIVE_LEXICON`. They are handy for opening a second archive once without
+disturbing the one you normally use.
 
 Full write-up of the schema, the deduplication, the encoding repair and everything else:
 **[DOCUMENTATION.md](DOCUMENTATION.md)**.

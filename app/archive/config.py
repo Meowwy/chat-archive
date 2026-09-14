@@ -53,8 +53,6 @@ WEB_BUILD = APP_DIR / "web" / "build"
 HOST = os.environ.get("ARCHIVE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ARCHIVE_PORT", "8765"))
 
-PLATFORMS = ("discord", "facebook", "instagram")
-
 
 class NoDatabase(RuntimeError):
     """Raised when something needs the archive but none is connected."""
