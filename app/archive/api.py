@@ -835,9 +835,10 @@ def pick_folder() -> dict:
     return _picked(picker.ask_directory)
 
 
-@app.post("/api/ingest/pick-dht")
-def pick_dht() -> dict:
-    return _picked(picker.ask_dht)
+@app.post("/api/ingest/pick-file")
+def pick_file() -> dict:
+    """A Discord .dht, or the .tar a Teams export arrives as."""
+    return _picked(picker.ask_export_file)
 
 
 @app.post("/api/ingest/inspect")

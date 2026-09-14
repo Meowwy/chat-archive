@@ -21,6 +21,7 @@ than failing, exactly as search itself degrades.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -36,7 +37,7 @@ from archive.api import app  # noqa: E402
 from archive.archive import Archive  # noqa: E402
 from archive.czech import Lexicon  # noqa: E402
 from archive.ids import demojibake, media_type, message_source_key, synth_id  # noqa: E402
-from archive.ingest import runner, secure  # noqa: E402
+from archive.ingest import runner, secure, teams_export  # noqa: E402
 from archive.ingest.detect import detect  # noqa: E402
 from archive.noise import is_reaction_notice  # noqa: E402
 
@@ -109,7 +110,8 @@ check(
 )
 
 by_platform = dict(sql("SELECT platform, COUNT(*) FROM messages GROUP BY platform"))
-check("all three platforms present", set(by_platform) == {"discord", "facebook", "instagram"},
+check("all four platforms present",
+      set(by_platform) == {"discord", "facebook", "instagram", "teams"},
       json.dumps(by_platform))
 check("the encrypted chats landed under facebook, not a fourth platform",
       by_platform["facebook"] > 150, str(by_platform["facebook"]))
@@ -148,7 +150,7 @@ check(
 )
 check(
     "an unsent message is marked, not invented",
-    one("SELECT COUNT(*) FROM messages WHERE is_unsent = 1") == 1,
+    one("SELECT COUNT(*) FROM messages WHERE is_unsent = 1") == 2,
 )
 
 # ------------------------------------------------------------------- vault
@@ -158,15 +160,15 @@ stored = sql(
 ).fetchall()
 missing = [row["local_path"] for row in stored if not fx.archive.vault.exists(row["local_path"])]
 check("every stored attachment exists on disk", not missing, f"{len(missing)} missing")
-check("the vault holds one file per platform", len(stored) == 4, f"{len(stored)} attachments")
+check("the vault holds one file per platform", len(stored) == 5, f"{len(stored)} attachments")
 check(
     "identical bytes are stored once",
     len({row["sha256"] for row in stored}) == 1,
-    "four references, one file",
+    "five references, one file",
 )
 check(
-    "a file Meta could not export is kept as an unavailable attachment",
-    one("SELECT COUNT(*) FROM attachments WHERE sha256 IS NULL") == 1,
+    "a file the provider could not export is kept as an unavailable attachment",
+    one("SELECT COUNT(*) FROM attachments WHERE sha256 IS NULL") == 2,
 )
 check(
     "and the bytes in the vault are the ones that went in",
@@ -246,6 +248,160 @@ check(
     not [s for s in detect(fx.exports["facebook"]) if getattr(s, "layout", None) == "secure"],
 )
 
+# ------------------------------------------------------------------ teams
+section("Microsoft Teams export")
+
+TEAMS_MSGS = "SELECT text FROM messages WHERE platform = 'teams'"
+teams_text = {row["text"] for row in sql(TEAMS_MSGS)}
+
+
+def teams_sender(fragment: str) -> str:
+    """Who the archive thinks wrote the message containing `fragment`."""
+    return one(
+        """SELECT u.name FROM messages m JOIN users u ON u.id = m.sender_id
+           WHERE m.platform = 'teams' AND m.text LIKE ?""",
+        (f"%{fragment}%",),
+    )
+
+
+check("the export is detected as Teams",
+      [s.kind for s in detect(fx.exports["teams"])] == ["teams"])
+check("so is the tar it arrives as, without unpacking it",
+      [s.kind for s in detect(fx.exports["teams_tar"])] == ["teams"])
+check("a folder that merely has a messages.json is not one",
+      teams_export.TeamsExport.at(fx.exports["facebook"]) is None)
+
+check("Teams ids are negative, like every other minted id",
+      one("SELECT COUNT(*) FROM messages WHERE platform = 'teams' AND message_id > 0") == 0)
+check("every Teams message has a dedup key built from its own id",
+      one("SELECT COUNT(*) FROM messages WHERE platform = 'teams' AND source_key IS NULL") == 0)
+
+# -- what the markup is turned into
+check("an emoticon becomes the emoji it stands for, once",
+      "to bude sranda 😆" in teams_text,
+      str([t for t in teams_text if "sranda" in t]))
+check("the shortcode spelling of it is not kept as well",
+      not any("(laugh)" in t for t in teams_text))
+check("Skype's 'go here to view this' boilerplate never reaches the text",
+      not any("Pokud chcete" in t for t in teams_text))
+check("a quoted copy of an earlier message is not indexed twice",
+      sum(1 for t in teams_text if "beru foťák" in t) == 1,
+      str([t for t in teams_text if "beru" in t]))
+check("the reply's own words survive the quote being dropped",
+      "dobrý nápad" in teams_text)
+check("an @mention keeps the name and loses the roster",
+      "@Petr Svoboda ať nezapomeneš" in teams_text,
+      str([t for t in teams_text if "nezapomene" in t]))
+
+# -- who wrote what: Teams says it four different ways
+check("a message with `from` set is yours", teams_sender("zítra jedeme") == fixture.ME)
+check("a displayName names the sender", teams_sender("to bude sranda") == fixture.JANA)
+check("an account with no name is found in a roster elsewhere in the export",
+      teams_sender("beru foťák") == fixture.PETR,
+      teams_sender("beru foťák"))
+check("a message Teams attributes to nobody is kept under one unknown identity",
+      teams_sender("kdo to psal") == "Unknown (Teams)")
+check("identities are keyed by account, so a shared display name cannot fuse two",
+      one("SELECT COUNT(*) FROM users WHERE platform = 'teams'") == 4,
+      str([r["name"] for r in sql("SELECT name FROM users WHERE platform = 'teams'")]))
+
+# -- what is deliberately left out
+check("calls, polls and joins are not messages",
+      not any(t.startswith("<") for t in teams_text)
+      and one("SELECT COUNT(*) FROM messages WHERE platform = 'teams'") == 12,
+      str(one("SELECT COUNT(*) FROM messages WHERE platform = 'teams'")))
+check("an album header, which has no media of its own, is dropped",
+      not any("MediaAlbum" in t for t in teams_text))
+check("a thread with nothing in it is not given a conversation",
+      one("SELECT COUNT(*) FROM channels WHERE platform = 'teams'") == 2)
+check("a group is a group even when Teams could not name every member",
+      one("SELECT type FROM servers WHERE name = ?", (fixture.TEAMS_GROUP,)) == "GROUP")
+
+# -- attachments
+check("a stored object lands in the vault under its own filename",
+      one("""SELECT COUNT(*) FROM attachments
+             WHERE platform = 'teams' AND name = 'vylet.png' AND sha256 IS NOT NULL""") == 1)
+check("only the object itself is stored, not its poster frame",
+      one("SELECT COUNT(*) FROM attachments WHERE platform = 'teams'") == 2)
+check("an object Teams left out of the download is kept as an unavailable file",
+      one("""SELECT COUNT(*) FROM attachments
+             WHERE platform = 'teams' AND name = 'mapa.pdf' AND sha256 IS NULL""") == 1)
+
+# -- reactions, replies, edits, cards
+teams_reactions = {
+    row["emoji_name"]
+    for row in sql("""SELECT emoji_name FROM message_reactions r
+                      JOIN messages m ON m.message_id = r.message_id
+                      WHERE m.platform = 'teams'""")
+}
+check("a named emoticon reaction becomes an emoji", "👍" in teams_reactions)
+check("so does one Teams spells as a codepoint", "✔" in teams_reactions)
+check("the read-marker Teams files in with reactions is not one",
+      len(teams_reactions) == 2, str(teams_reactions))
+check("both spellings of a reply point at their parent",
+      one("""SELECT COUNT(*) FROM message_replied_to r JOIN messages m
+             ON m.message_id = r.message_id WHERE m.platform = 'teams'""") == 2)
+check("a reply points at a message that is really there",
+      one("""SELECT COUNT(*) FROM message_replied_to r
+             JOIN messages m ON m.message_id = r.message_id
+             LEFT JOIN messages t ON t.message_id = r.replied_to_id
+             WHERE m.platform = 'teams' AND t.message_id IS NULL""") == 0)
+check("an edit keeps its timestamp",
+      one("""SELECT COUNT(*) FROM message_edit_timestamps e JOIN messages m
+             ON m.message_id = e.message_id WHERE m.platform = 'teams'""") == 1)
+check("a deleted message is marked unsent rather than dropped",
+      one("SELECT COUNT(*) FROM messages WHERE platform = 'teams' AND is_unsent = 1") == 1)
+teams_embeds = [
+    json.loads(row["json"])
+    for row in sql("""SELECT e.json FROM message_embeds e JOIN messages m
+                      ON m.message_id = e.message_id WHERE m.platform = 'teams'""")
+]
+check("a link preview becomes an embed",
+      any(e["url"] == fixture.TEAMS_LINK for e in teams_embeds))
+check("a GIF Skype base64'd into a card is recovered, not dropped as an empty message",
+      any(e.get("title") == "Celebrate GIF" for e in teams_embeds), str(teams_embeds))
+
+# -- the same export, read the other way
+# Into an empty archive first, so the tar is genuinely read: importing it over
+# the folder's rows would take the deduplication path and stream nothing.
+teams_only_dir = Path(tempfile.mkdtemp(prefix="chat-archive-teams-"))
+teams_only = Archive.create(teams_only_dir / "tar.sqlite", teams_only_dir / "vault", verbose=False)
+try:
+    for kind, tar_stats in runner.ingest_path(teams_only, fx.exports["teams_tar"]):
+        check("the tar imports without being unpacked",
+              tar_stats.new_msgs > 0 and tar_stats.new_media == 1,
+              f"{tar_stats.new_msgs} messages, {tar_stats.new_media} media")
+    folder_rows = sql("""SELECT message_id, text FROM messages
+                         WHERE platform = 'teams' ORDER BY message_id""").fetchall()
+    tar_rows = teams_only.read().execute(
+        "SELECT message_id, text FROM messages WHERE platform = 'teams' ORDER BY message_id"
+    ).fetchall()
+    check("the tar and the folder produce the very same rows",
+          [tuple(r) for r in folder_rows] == [tuple(r) for r in tar_rows],
+          f"{len(folder_rows)} vs {len(tar_rows)}")
+    streamed = teams_only.read().execute(
+        "SELECT sha256, local_path FROM attachments WHERE sha256 IS NOT NULL"
+    ).fetchone()
+    check("media streamed out of the tar arrives byte for byte",
+          teams_only.vault.abspath(streamed["local_path"]).read_bytes() == fixture.PIXEL)
+finally:
+    teams_only.close()
+    shutil.rmtree(teams_only_dir, ignore_errors=True)
+
+before_teams = one("SELECT COUNT(*) FROM messages WHERE platform = 'teams'")
+for kind, tar_stats in runner.ingest_path(fx.archive, fx.exports["teams_tar"]):
+    check("re-reading the export the other way adds nothing",
+          tar_stats.new_msgs == 0 and tar_stats.dup_msgs == before_teams,
+          f"{tar_stats.new_msgs} new, {tar_stats.dup_msgs} duplicates")
+    check("and stores no media a second time", tar_stats.new_media == 0)
+check("the folder and the tar are one export, not two",
+      one("SELECT COUNT(*) FROM messages WHERE platform = 'teams'") == before_teams)
+check(
+    "the account that requested the export is linked to whoever is marked as you",
+    one("""SELECT p.is_self FROM users u JOIN people p ON p.person_id = u.person_id
+           WHERE u.id = ?""", (synth_id("teams", "user", fixture.TEAMS_ME),)) == 1,
+)
+
 # --------------------------------------------------------------------- api
 section("api endpoints")
 stats = client.get("/api/stats").json()
@@ -253,7 +409,7 @@ check("GET /api/stats", stats["total"] == total, f"{stats['total']}")
 check("it names the archive it is serving", stats["db_path"] == str(fx.archive.path))
 
 threads = client.get("/api/threads").json()
-check("GET /api/threads", len(threads) == 6, f"{len(threads)} threads")
+check("GET /api/threads", len(threads) == 8, f"{len(threads)} threads")
 check("a conversation with nothing in it is not listed",
       all(int(t["messages"]) > 0 for t in threads))
 check("thread ids are strings", all(isinstance(t["id"], str) for t in threads))
@@ -302,12 +458,13 @@ check("the thread is in its own group",
       biggest["id"] in {t["id"] for t in detail["group"]["threads"]})
 check(
     "one person's chats on every platform are one group",
-    len(detail["group"]["threads"]) == 4,
+    len(detail["group"]["threads"]) == 5,
     f"{len(detail['group']['threads'])} chats under {detail['group']['person']}",
 )
 check(
-    "the group spans all three platforms",
-    {t["platform"] for t in detail["group"]["threads"]} == {"discord", "facebook", "instagram"},
+    "the group spans all four platforms",
+    {t["platform"] for t in detail["group"]["threads"]}
+    == {"discord", "facebook", "instagram", "teams"},
 )
 grouped = [t for t in threads if t["person_id"] is not None]
 check(
@@ -545,8 +702,8 @@ check("unknown media hash is 404", client.get(f"/api/media/{'0' * 64}").status_c
 people = client.get("/api/people").json()
 check("GET /api/people", "identities" in people, f"{len(people['identities'])} identities")
 check("someone is marked as self", any(p["is_self"] for p in people["people"]))
-check("one person can hold three identities",
-      any(p["identities"] == 3 for p in people["people"]))
+check("one person can hold four identities",
+      any(p["identities"] == 4 for p in people["people"]))
 
 check("GET /api/ingest/history", "ingest" in client.get("/api/ingest/history").json())
 check("every ingest run is logged as ok",
@@ -555,7 +712,7 @@ check("every ingest run is logged as ok",
 inspect = client.post("/api/ingest/inspect", json={"path": str(fx.root)}).json()
 check("POST /api/ingest/inspect finds every export in the root",
       {s["label"] for s in inspect["sources"]}
-      == {"Facebook", "Instagram", "Messenger (encrypted chats)"},
+      == {"Facebook", "Instagram", "Messenger (encrypted chats)", "Microsoft Teams"},
       str([s["label"] for s in inspect["sources"]]))
 check("it counts what it found before importing",
       all(s["messages"] > 0 and s["threads"] > 0 for s in inspect["sources"]))
@@ -765,9 +922,10 @@ for kind, stats_row in runner.ingest_path(fx.archive, fx.root):
     check(f"re-ingest {kind}: no new messages", stats_row.new_msgs == 0,
           f"{stats_row.dup_msgs} duplicates skipped")
     check(f"re-ingest {kind}: no new media", stats_row.new_media == 0)
-    if kind != "messenger":
+    if kind not in ("messenger", "teams"):
         # Meta writes the literal "Failed to download media" in place of a URI
-        # for media it could not export; those stay unresolvable.
+        # for media it could not export, and Teams simply leaves objects out of
+        # the download. Neither ever resolves, on this run or any later one.
         check(f"re-ingest {kind}: nothing missing", stats_row.missing_media == 0)
     if kind == "instagram":
         check("re-ingest drops Instagram's reaction notices", stats_row.skipped_notices == 3,

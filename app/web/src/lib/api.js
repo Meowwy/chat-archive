@@ -58,7 +58,7 @@ export const api = {
 	linkIdentities: (personId, userIds) =>
 		post('/people/link', { person_id: personId, user_ids: userIds }),
 	pickFolder: () => post('/ingest/pick-folder'),
-	pickDht: () => post('/ingest/pick-dht'),
+	pickFile: () => post('/ingest/pick-file'),
 	inspect: (path) => post('/ingest/inspect', { path }),
 	history: () => get('/ingest/history')
 };

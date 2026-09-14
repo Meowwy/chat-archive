@@ -28,7 +28,7 @@
 		results = [];
 		runError = null;
 		try {
-			const data = choose === 'file' ? await api.pickDht() : await api.pickFolder();
+			const data = choose === 'file' ? await api.pickFile() : await api.pickFolder();
 			if (data.path) {
 				path = data.path;
 				sources = data.sources ?? [];
@@ -76,11 +76,12 @@
 <div class="wrap">
 	<h1>Import exports</h1>
 	<p class="lead">
-		Pick the folder holding an export downloaded from Facebook or Instagram, or the
-		<code class="inline">.dht</code> file Discord History Tracker writes. Everything is copied
-		into the archive — messages, and whatever attachments came with them — so the original is no
-		longer needed afterwards. Anything already in the archive is skipped, so importing twice is
-		safe.
+		Pick the folder holding an export downloaded from Facebook, Instagram or Microsoft Teams —
+		or, for a single file, the <code class="inline">.dht</code> Discord History Tracker writes
+		and the <code class="inline">.tar</code> a Teams export arrives as, which is read where it
+		lies and never needs unpacking. Everything is copied into the archive — messages, and
+		whatever attachments came with them — so the original is no longer needed afterwards.
+		Anything already in the archive is skipped, so importing twice is safe.
 	</p>
 
 	{#if database}
@@ -96,7 +97,7 @@
 			{picking === 'folder' ? 'Opening…' : 'Choose a folder…'}
 		</button>
 		<button onclick={() => pick('file')} disabled={picking || running}>
-			{picking === 'file' ? 'Opening…' : 'Choose a .dht file…'}
+			{picking === 'file' ? 'Opening…' : 'Choose a file…'}
 		</button>
 		<input
 			type="text"
@@ -153,9 +154,16 @@
 					</li>
 					{#if result.stats.skipped_notices}
 						<li>
-							Ignored: {formatCount(result.stats.skipped_notices)} reaction notices
-							("Reacted 👍 to your message"), which the viewer shows on the message
-							they belong to
+							{#if result.kind === 'teams'}
+								Ignored: {formatCount(result.stats.skipped_notices)} messages with
+								nothing to show — album headers, whose photos arrive as messages of
+								their own, and stickers Teams no longer serves. Calls, polls and
+								"X was added" notices are left out too, and are not counted here.
+							{:else}
+								Ignored: {formatCount(result.stats.skipped_notices)} reaction notices
+								("Reacted 👍 to your message"), which the viewer shows on the message
+								they belong to
+							{/if}
 						</li>
 					{/if}
 				</ul>

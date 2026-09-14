@@ -10,7 +10,7 @@
 	let loading = $state(true);
 	let error = $state(null);
 
-	const filters = ['all', 'discord', 'facebook', 'instagram'];
+	const filters = ['all', 'discord', 'facebook', 'instagram', 'teams'];
 
 	$effect(() => {
 		const current = platform;

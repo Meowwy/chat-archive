@@ -22,8 +22,9 @@ from ..archive import Archive
 from ..vault import Vault
 from . import discord as discord_ingest
 from . import dht
-from .detect import DhtSource, ExportSource, detect
+from .detect import DhtSource, ExportSource, TeamsSource, detect
 from .meta import MetaIngest, Stats
+from .teams import TeamsIngest
 
 Progress = Callable[[str], None]
 
@@ -75,7 +76,7 @@ def _rollback(con: sqlite3.Connection) -> None:
 
 def ingest_source(
     con: sqlite3.Connection,
-    source: ExportSource | DhtSource,
+    source: ExportSource | DhtSource | TeamsSource,
     vault: Vault,
     progress: Progress | None = None,
 ) -> Stats:
@@ -88,6 +89,15 @@ def ingest_source(
             # ATTACH is illegal inside a transaction, so that importer runs its
             # own BEGIN/COMMIT rather than being wrapped in one here.
             stats = dht.ingest(con, vault, source.path, progress)
+        elif isinstance(source, TeamsSource):
+            con.execute("BEGIN")
+            try:
+                stats = TeamsIngest(con, source, vault, progress).run()
+            finally:
+                # The export may be a tar held open for the whole run; it is
+                # this importer's own handle, so it closes it either way.
+                source.export.close()
+            con.execute("COMMIT")
         else:
             con.execute("BEGIN")
             stats = MetaIngest(con, source, vault, progress).run()

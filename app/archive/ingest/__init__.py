@@ -1,1 +1,1 @@
-from .detect import DhtSource, ExportSource, detect  # noqa: F401
+from .detect import DhtSource, ExportSource, TeamsSource, detect  # noqa: F401

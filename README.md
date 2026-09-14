@@ -1,6 +1,7 @@
 # Chat Archive
 
-Read and search your Discord, Facebook Messenger and Instagram conversations in one place, **offline on device**.
+Read and search your Discord, Facebook Messenger, Instagram and Microsoft Teams conversations in one
+place, **offline on device**.
 
 ## What is this tool for:
 
@@ -16,8 +17,8 @@ Technical notes of my solution:
 - **Search that works in Czech.** Full-text over every message, diacritics-insensitive, and
   aware of Czech inflection: search `hospoda` and you also get inflected forms like `hospody`, `hospodě`, `hospodu`.
   More complex queries supported (same logic as in Google search: `OR`, `-` and brackets).
-- **One person, many accounts.** Link someone's Discord, Facebook and Instagram identities and
-  give them a name; that name is what the whole app shows.
+- **One person, many accounts.** Link someone's Discord, Facebook, Instagram and Teams identities
+  and give them a name; that name is what the whole app shows.
 - **Words over time.** Pick a person and see every message they exchanged as a line, month by
   month. Type a word and the line becomes the months they used it — in every form, the same
   search, counted instead of listed. Pick up to ten people to compare them on one chart.
@@ -80,6 +81,25 @@ then exactly as for Facebook above.
 > the HTML export cannot be ingested. Meta emails you a download link, usually within a few hours.
 > Unzip it and keep the folder — you will point the app at it once.
 
+### Microsoft Teams
+
+In MS Teams, click on your **profile picture at the top right** → **My Microsoft account** →
+**Privacy** tab at the left → scroll down to the section **Find privacy settings in Microsoft
+products** → click on **Teams** → set the export and confirm. Direct link:
+[teams.live.com/dataexport](https://teams.live.com/dataexport). There is also a video walkthrough:
+[youtu.be/hsB08IcyjD8](https://youtu.be/hsB08IcyjD8?si=L3nyDUnihFUMsFrF).
+
+Microsoft emails a link when the export is ready, and what downloads is a single **`.tar`** holding
+`messages.json` beside a flat `media/` folder. **You do not have to unpack it.** These exports get
+large — mostly video — and unpacking costs that much disk again before a single message reaches the
+archive, so point the app straight at the `.tar` and it reads what it needs from inside. If you have
+already unpacked it, pick the folder instead; both work and import identically.
+
+> Teams does not put everything in the download. Some attachments are referenced by the messages
+> and their bytes are simply absent: voice messages, ordinary files such as PDFs and spreadsheets,
+> and a share of the older photos and videos. Those show as an unavailable attachment, with the
+> message text completely intact.
+
 ### Discord
 
 Discord has no official export, so use **[Discord History Tracker](https://dht.chylex.com/)** — a
@@ -90,14 +110,15 @@ it. Re-import it whenever you have scraped more; only new messages are added.
 
 ## Importing
 
-Open the **Import** page and press **Choose a folder…** for an unzipped Facebook, Instagram or
-encrypted-Messenger export, or **Choose a .dht file…** for Discord. Check what was detected, and import. Or from a
-terminal:
+Open the **Import** page and press **Choose a folder…** for an unzipped Facebook, Instagram,
+encrypted-Messenger or Teams export, or **Choose a file…** for Discord's `.dht` or a Teams `.tar`.
+Check what was detected, and import. Or from a terminal:
 
 ```
 py -m archive ingest "C:/path/to/your_instagram_activity"
 py -m archive ingest "C:/path/to/your_facebook_activity"
 py -m archive ingest "C:/path/to/messages"          # encrypted Messenger chats
+py -m archive ingest "C:/path/to/teams_export.tar"  # or the folder, if you unpacked it
 py -m archive ingest "C:/path/to/discord_archive.dht"
 ```
 

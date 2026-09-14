@@ -1,12 +1,14 @@
 """Work out what the user picked actually contains.
 
-Three kinds of source are understood:
+Four kinds of source are understood:
 
 - a Meta export folder - the extracted download root, a `your_*_activity`
   folder, its `messages/` subfolder, or `messages/inbox/` itself;
 - a Messenger encrypted-chat download - the flat `messages/` folder of one JSON
   per conversation that Meta's "secure storage" export unzips to, beside the
   `media/` folder its URIs point at (see ingest/secure.py);
+- a Microsoft Teams export - the folder it unpacks to, or the `.tar` it arrives
+  as, which is read in place (see ingest/teams_export.py);
 - a Discord History Tracker `.dht` file, either picked directly or found in a
   folder that was picked.
 
@@ -25,6 +27,7 @@ from pathlib import Path
 
 from .. import db
 from . import secure
+from .teams_export import TeamsExport
 
 MARKERS = {
     "your_facebook_activity": "facebook",
@@ -92,6 +95,46 @@ class ExportSource:
             "kind": self.kind,
             "label": self.label,
             "path": str(self.marker_dir),
+            "threads": threads,
+            "messages": messages,
+        }
+
+
+@dataclass
+class TeamsSource:
+    """A Microsoft Teams export - an unpacked folder, or the .tar it came as."""
+
+    export: TeamsExport
+    kind: str = "teams"
+    label: str = "Microsoft Teams"
+
+    @property
+    def path(self) -> Path:
+        return self.export.path
+
+    def summary(self) -> dict:
+        """What is inside, counting only what would actually be imported.
+
+        Teams lists every thread the account has ever been attached to, empty
+        ones and its own internal "stream" threads included, so counting raw
+        conversations would promise more than the import delivers.
+        """
+        from .teams import importable  # local: teams.py imports this module
+
+        threads = messages = 0
+        try:
+            index = self.export.read_index()
+        except (OSError, ValueError):
+            index = {}
+        for conversation in index.get("conversations") or []:
+            found = sum(1 for m in conversation.get("MessageList") or [] if importable(m))
+            if found:
+                threads += 1
+                messages += found
+        return {
+            "kind": self.kind,
+            "label": self.label,
+            "path": str(self.path),
             "threads": threads,
             "messages": messages,
         }
@@ -192,6 +235,30 @@ def _find_secure(path: Path) -> list[Path]:
     return found
 
 
+def _find_teams(path: Path) -> list[TeamsExport]:
+    """Teams exports at, or just below, `path`.
+
+    A download that has been unpacked is a folder holding `messages.json`; one
+    that has not is the `.tar` itself, and either is read the same way. Looking
+    one level down means the folder the tar was extracted *into* works as well
+    as the folder it produced.
+    """
+    found: list[TeamsExport] = []
+    seen: set[Path] = set()
+    candidates = [path, *sorted(path.glob("*")), *sorted(path.glob("*.tar"))]
+    for candidate in candidates:
+        if not (candidate.is_dir() or candidate.suffix.lower() == ".tar"):
+            continue
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        export = TeamsExport.at(candidate)
+        if export is not None:
+            found.append(export)
+    return found
+
+
 def _find_markers(path: Path) -> list[Path]:
     """Locate `your_*_activity` folders at, above, or just below `path`."""
     found: list[Path] = []
@@ -236,9 +303,13 @@ def detect(
             raise ValueError("That file is the archive you are connected to, not an import.")
         if is_dht(path):
             return [DhtSource(path=path)]
+        export = TeamsExport.at(path)
+        if export is not None:
+            return [TeamsSource(export=export)]
         raise ValueError(
-            f"{path.name} is not a Discord History Tracker file.\n"
-            "Pick the .dht file the tracker writes, or a folder holding a "
+            f"{path.name} is not an export this app can read.\n"
+            "Pick the .dht file Discord History Tracker writes, the .tar a "
+            "Microsoft Teams export arrives as, or a folder holding a "
             "Facebook, Instagram or Messenger export."
         )
 
@@ -258,6 +329,7 @@ def detect(
                     kind="messenger", marker_dir=folder, thread_files=files, layout="secure"
                 )
             )
+    sources.extend(TeamsSource(export=export) for export in _find_teams(path))
     # A folder can also simply hold tracker files - picking Archives/ works.
     sources.extend(DhtSource(path=found) for found in sorted(path.glob("*.dht")) if is_dht(found))
 
@@ -266,7 +338,8 @@ def detect(
             f"Nothing importable found in {path}.\n"
             "Pick the folder containing 'your_facebook_activity' or "
             "'your_instagram_activity' (or one of those folders itself), the "
-            "'messages' folder from a Messenger encrypted-chat download, or a "
+            "'messages' folder from a Messenger encrypted-chat download, a "
+            "Microsoft Teams export (its folder or its .tar), or a "
             "Discord History Tracker .dht file."
         )
     return sources

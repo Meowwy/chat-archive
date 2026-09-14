@@ -134,8 +134,8 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 
 # --- new columns on the DHT-mirrored tables ------------------------------
-# 'platform' defaults to 'discord', so the 134k rows already present are
-# correctly labelled without a backfill pass.
+# 'platform' defaults to 'discord', so rows already present in an archive that
+# predates the column are correctly labelled without a backfill pass.
 _COLUMNS: list[tuple[str, str, str]] = [
     ("servers", "platform", "TEXT NOT NULL DEFAULT 'discord'"),
     ("channels", "platform", "TEXT NOT NULL DEFAULT 'discord'"),

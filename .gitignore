@@ -17,6 +17,11 @@ discord_export/
 /messages/
 /media/
 
+# A Microsoft Teams export, which is read where it lies rather than unpacked -
+# so it tends to sit in the working tree, and it runs to many gigabytes
+*.tar
+messages.json
+
 # Which database this machine is connected to
 app/settings.local.json
 

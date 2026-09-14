@@ -98,6 +98,45 @@ class Vault:
         self._write(rel, lambda tmp: Path(tmp).write_bytes(blob))
         return Stored(sha, rel, len(blob), True)
 
+    def put_stream(self, stream, suffix: str) -> Stored:
+        """Same as `put`, for bytes arriving from somewhere that is not a file.
+
+        A Teams export is read without being unpacked, so its media arrives as a
+        stream out of the tar - and a single video runs to a hundred megabytes,
+        which is no reason to hold it in memory. The name a file gets is its
+        hash, and the hash is only known once every byte has been seen, so this
+        writes first and names afterwards: the bytes land in a temp file while
+        being hashed, and that file is then moved to the place its own hash
+        chose. Bytes already in the vault cost one write that is thrown away,
+        which is what keeps the common case honest rather than fast.
+        """
+        staging = self.root / "_incoming"
+        staging.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        size = 0
+        fd, tmp = tempfile.mkstemp(dir=str(staging), suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                while chunk := stream.read(_CHUNK):
+                    digest.update(chunk)
+                    size += len(chunk)
+                    out.write(chunk)
+            sha = digest.hexdigest()
+            rel = relpath_for(sha, suffix)
+            if self.exists(rel):
+                return Stored(sha, rel, size, False)
+            dest = self.abspath(rel)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tmp, dest)
+            tmp = None
+            return Stored(sha, rel, size, True)
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
     def _write(self, relpath: str, fill) -> None:
         """Fill a temp file beside the destination, then move it into place."""
         dest = self.abspath(relpath)

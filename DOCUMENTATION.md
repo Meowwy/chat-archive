@@ -8,6 +8,7 @@ How the archive is built and why it works the way it does. For getting started, 
 | Discord | Discord History Tracker `.dht` file |
 | Instagram | official export JSON |
 | Facebook | official export JSON |
+| Microsoft Teams | official export `.tar` (or the folder it unpacks to) |
 
 The archive itself — the database, the media vault and the exports — is **not** in this
 repository. It is personal data, and the app is built to be handed one.
@@ -66,14 +67,14 @@ file again — only what is new is added.
 |---|---|
 | `py -m archive serve` | Run the web viewer |
 | `py -m archive db [<path>] [--create]` | Show, connect or create the archive database |
-| `py -m archive ingest <path>` | Import a Meta export folder, a Messenger encrypted-chat download, or a Discord `.dht` file |
+| `py -m archive ingest <path>` | Import a Meta export folder, a Messenger encrypted-chat download, a Microsoft Teams export (folder or `.tar`), or a Discord `.dht` file |
 | `py -m archive stats` | What is in the archive right now |
 | `py -m archive migrate` | Apply schema changes (backs the DB up first) |
 | `py -m archive clean` | Drop Instagram's "Reacted 👍 to your message" pseudo-messages |
 | `py -m archive discord-media` | Recover Discord attachments that exist locally |
 | `py -m archive setup` | `migrate` + `discord-media` |
 | `py -m archive people` | List every identity and the person it belongs to |
-| `py smoke_test.py` | End-to-end checks against a throwaway archive (200 assertions) |
+| `py smoke_test.py` | End-to-end checks against a throwaway archive (241 assertions) |
 
 ## How it fits together
 
@@ -82,6 +83,7 @@ discord_archive.dht                     live tracker file, read-only
 your_facebook_activity/                 export folders
 your_instagram_activity/
 messages/ + media/                      Messenger encrypted-chat download
+<teams export>.tar                      read in place, never unpacked
         |
         |  the Import page, or py -m archive ingest   (append-only)
         v
@@ -92,8 +94,10 @@ messages/ + media/                      Messenger encrypted-chat download
 chat_media_vault/                       content-addressed media
 ```
 
-Everything lives in **one** database. Facebook and Instagram messages go into the same
-`messages`, `channels` and `users` tables as Discord, distinguished by a `platform` column.
+Everything lives in **one** database. Facebook, Instagram and Teams messages go into the same
+`messages`, `channels` and `users` tables as Discord, distinguished by a `platform` column. Adding
+Teams added no table and no column — the fourth platform fitted the schema the first three had
+already settled.
 
 ### The three Meta exports, one importer
 
@@ -123,11 +127,124 @@ an identity with nothing behind them. And where it could not retrieve an attachm
 literal string `"Failed to download media"` in place of the URI; that is kept, and shows up as an
 unavailable attachment, because the message really did carry one.
 
-### Why Meta ids are negative
+### The Teams export
+
+Microsoft hands back one uncompressed `.tar` with everything at its root: `messages.json` — every
+conversation and every message in a single JSON document — beside a flat `media/` folder of stored
+objects, plus `endpoints.json` and `invites.json`, which are not conversation and are not imported.
+
+**It is read where it lies.** These exports get large, mostly video, and unpacking one costs that
+much disk again before a single message is imported — so `ingest/teams_export.py` opens either the
+folder *or* the tar and answers the same three questions of both: what does `messages.json` say,
+which objects exist, and give me the bytes of this one. `tarfile` indexes the
+members once and then seeks, so an object is fetched without re-reading the archive, and the bytes
+stream from the tar into the vault through `Vault.put_stream`, never landing anywhere in between and
+never being held in memory. Pointing at an unpacked folder works identically; `smoke_test.py` imports
+the same export both ways and asserts the two produce byte-identical rows.
+
+**Media is keyed by document id.** A message lists `amsreferences: ["0-weu-d6-…"]`, and the objects
+are named `media/<doc id>.<rendition>.<ext>`. Rendition `1` is the object itself; `2` is a video's
+poster frame and `3` a voice message's transcript, and only the first is stored — the rest are
+derived and the viewer never asks for them.
+
+**Teams leaves a good deal out.** A sizeable share of the objects its own messages reference are
+simply not in the download: voice messages, non-media files, and some of the older pictures. Those
+are kept as attachment rows with a name, a type and no bytes — the same unavailable-file card
+Discord's expired CDN links produce — because the message really did carry one. Everything that is
+present is stored.
+
+#### Working out who wrote a message
+
+Teams attributes a message four different ways depending on which client sent it and whether Skype's
+migration carried it over, and one of those ways is not at all:
+
+| what the message carries | who that is |
+|---|---|
+| `from` | you, and only ever you — Teams fills it in for the exporting account alone |
+| `displayName` | the sender's name, with no id |
+| `properties.importedBy.RawValue` | the sender's Skype account id, sometimes with no name |
+| none of them | nobody — which Teams does on some recent group messages |
+
+An account id is the identity, not a name, so two people who share a display name stay two
+identities — the caveat that applies to every Meta import does not apply here. That leaves the
+accounts with an id and no name, and the export turns out to be full of a directory nobody advertises:
+an `<at>` mention carries id and name together, so does a quoted reply's header, and Teams staples a
+whole `<roster>` of the conversation onto any message that mentions somebody. `teams_content.identity_hints`
+harvests all of it in a pass over every message before any of them is imported, and where an account
+is named more than one way the commonest spelling wins. That is what turns a long run of messages
+from a bare account id into messages from a named person.
+
+Ids arrive in two spellings — `<quote author="live:someone">` drops the `8:` prefix that
+`importedBy` keeps — so they are normalised before anything counts them, or one person would be
+filed as two. Where two accounts genuinely share a name the handle is appended to both, so the
+People page stays readable.
+
+Messages Teams attributes to nobody are imported under a single **Unknown (Teams)** identity rather
+than dropped. The alternative was discarding real messages; this way the text is searchable and the
+People page has something to link if it is ever worked out who wrote them.
+
+The account that requested the export *is* known — `messages.json` names it — so it is linked to
+whoever is already marked as you on the People page. That is a fact rather than a guess, which is why
+it is done at ingest and not left to be tidied up by hand; Meta exports cannot do it because nothing
+in them says which participant you are.
+
+#### Getting the sentence out of the markup
+
+Teams inherited every message format Skype ever had and kept them all, so one conversation mixes
+plain text, Skype's tag soup and modern Teams HTML. `ingest/teams_content.py` reduces all of it to
+what somebody actually typed:
+
+- An emoticon is written twice — `<ss type="laugh" alt="😆">(laugh)</ss>` — and exactly one of them
+  is the message. The `alt` wins; the shortcode between the tags is dropped.
+- A reply carries a **copy** of the message it answers, either as Skype's `<quote>` or as Teams'
+  `<blockquote itemtype=".../Reply">`. The copy is dropped and the link recorded in
+  `message_replied_to`, so the words are indexed once, under the message that actually said them.
+- A media message's text is Skype's *"Pokud chcete zobrazit tuto sdílenou fotku, přejděte na: …"* —
+  the recipient's-language fallback, never a caption. Media messages are given no text at all rather
+  than having it stripped: indexing it would put every photo in the archive into the results for
+  *fotku*.
+- `<img alt="shared image">` is a picture, `<img alt="😉">` is an emoji. An `alt` with a Latin letter
+  in it is prose about the element, not the element, and is dropped.
+- Skype base64'd shared GIFs into a `<Swift b64="…">` attribute inside a card whose visible text is
+  "To view this card, go to: …". Decoding them recovers every such message, which would otherwise
+  have imported empty and been dropped.
+
+Reactions are Skype emoticon shortcodes (`cwl`, `yes-tone1`, `2714_heavycheckmark`) and are mapped to
+emoji — the codepoint-prefixed ones directly, the named ones through a table, and anything unknown
+keeps its own name rather than being guessed at or discarded. Teams files its read-marker,
+`reactionsConsumptionHorizon`, in among the reactions; it is not one.
+
+**Calls, polls, and "X was added" notices are not imported**, nor is Skype's machine translation of a
+message the archive already holds in the original. Neither are messages that end up with no text, no
+attachment and no embed — an album header, whose photos arrive as messages of their own, and stickers
+Teams no longer serves.
+
+#### Why re-importing is exactly a no-op
+
+Teams numbers every message, and the number is its arrival time in milliseconds, so it is the same in
+every export you will ever request:
+
+```
+source_key = teams | <conversation id> | <message id>
+```
+
+That is the first importer here with a real id to lean on. Meta exports carry none, so
+`ingest/meta.py` has to hash the message's own content and lives with the caveat that a freshly
+requested encrypted-chat download re-imports media-only messages as new rows. Teams has no such
+caveat: re-importing an overlapping export adds nothing at all, and the tar and the unpacked folder
+are the same export down to the primary key.
+
+### Why minted ids are negative
 
 Discord snowflakes are always positive. Facebook and Instagram exports contain no message ids at
 all, so the ingest mints its own: a 62-bit hash of the message's content, **negated**. A Meta id
 therefore *cannot* collide with a Discord id — it is structurally impossible, not just unlikely.
+
+Teams ids are hashed the same way even though Teams does supply one, for two reasons: its ids are
+positive and only 13 digits, so they sit squarely in the range a Discord snowflake could occupy, and
+hashing the whole `source_key` rather than the bare id is what keeps two conversations' messages
+apart. What is hashed differs — Teams hashes an id, Meta hashes content — but every minted id lands
+in the same negative half of the space.
 
 Ids cross the HTTP boundary as **strings**. They are 62–63 bit integers and JavaScript numbers
 lose precision above 2^53, so `JSON.parse` would silently corrupt them.
@@ -146,8 +263,8 @@ every time you request one. Re-importing the *same* folder is a no-op, but a new
 download re-imports media-only messages as new rows. The vault still stores each file's bytes
 once, addressed by their sha256.
 
-Verified unique across every message in the exports it was built against (6,792 of them), with
-zero collisions. The message id is a hash of that key, so the primary key does the deduplication and re-importing an
+Verified unique across every message in the exports it was built against, with zero collisions. The
+message id is a hash of that key, so the primary key does the deduplication and re-importing an
 overlapping export is a genuine no-op.
 
 ### Importing a .dht file
@@ -189,11 +306,11 @@ put an apostrophe back where a writer plausibly dropped one (`o'clock`, `don't`,
 
 #### Czech words are searched in every form
 
-Czech inflects heavily — a noun has about ten forms, a verb about fifty — so matching the exact
-spelling that was typed finds a fraction of what was meant. Searching `hospoda` in this archive
-finds 6 messages; searching its whole paradigm finds **48**. So each word is looked up in a
-Czech dictionary and widened to every form sharing its lemma: `hospody`, `hospodě` and `hospodu`
-are all one search, and it does not matter which one you type.
+Czech inflects heavily — a noun has about ten forms, a verb about fifty — so matching only the
+exact spelling that was typed finds a fraction of what was meant; searching a word's whole paradigm
+routinely finds several times as much. So each word is looked up in a Czech dictionary and widened
+to every form sharing its lemma: `hospody`, `hospodě` and `hospodu` are all one search, and it does
+not matter which one you type.
 
 The dictionary is `data/czech/`, compiled once into `Archives/czech_lemmas.sqlite` by
 `py -m archive czech-dict` (~15 s, 149 MB, gitignored). It holds 3,370,510 forms over 272,867
@@ -255,16 +372,16 @@ same query language as above.
 One endpoint answers both: `GET /api/stats/months?threads=<ids>&q=<word>`. Without `q` it groups
 those chats' messages by month; with it, the FTS expression the search page would have run is
 joined onto the index and the matches are grouped the same way. Counting in SQL rather than in
-the browser is what makes it instant on a 137k-message conversation — the page never pages
+the browser is what keeps it instant on a conversation of any size — the page never pages
 through hits to plot them, and the line can never disagree with the search results behind it,
 which `smoke_test.py` asserts outright.
 
 A month's number is how many *messages* used the word, not how many times it occurs in them —
 the same number the search page reports as its result count. Months nobody spoke in come back
 missing, so the browser fills the range before plotting: a silent month is a zero on the line
-rather than a straight segment drawn across it. The y-axis rescales to whatever is on show, so
-24 messages fill the height as readily as 4,692, and **Split by author** breaks the line into the
-same blue and pink halves the conversation timeline uses.
+rather than a straight segment drawn across it. The y-axis rescales to whatever is on show, so a
+couple of dozen messages fill the height as readily as a few thousand, and **Split by author**
+breaks the line into the same blue and pink halves the conversation timeline uses.
 
 Picking more people adds a line each, up to ten — as many as the palette can keep apart. There
 the me-and-them split gives way to a single question asked of everyone at once: **All**,
@@ -279,18 +396,17 @@ colour-blind separation against each neighbouring pair.
 Instagram writes a reaction into the thread twice: once on the message it belongs to, and once as
 a standalone message reading *"Reacted 😂 to your message"* or *"Liked a message"*. The viewer
 already shows reactions under their message, so the standalone copies are dropped at ingest and
-`py -m archive clean` (also part of `migrate`) removes any an earlier run let through — 2,482 of
-them in this author's archive. A notice is only dropped when it carries nothing else: no media, no
-share, no reaction of its own.
+`py -m archive clean` (also part of `migrate`) removes any an earlier run let through. A notice is
+only dropped when it carries nothing else: no media, no share, no reaction of its own.
 
 ## Discord attachments: what survives
 
 Most do not, and this is not fixable after the fact. Discord CDN links are signed and expire about
 24 hours after they are issued:
 
-- Measured on this author's archive: **9,740 of 9,805 images and 179 of 180 files return HTTP
-  404.** Those bytes are gone.
-- The handful downloaded in time are in the vault.
+- In practice almost every image and file an older archive points at returns HTTP **404**. Those
+  bytes are gone.
+- The few that were downloaded while their links were still fresh are in the vault.
 - Attachments and avatars embedded inside the `.dht` file itself are recovered offline — during
   the import, or afterwards with `py -m archive discord-media`.
 
@@ -298,13 +414,13 @@ Dead attachments still render as a card showing the filename, type, size and dim
 message text is completely intact. Meta media is unaffected — every referenced file is stored.
 
 **To stop losing future ones:** turn attachment downloading on inside the Discord History Tracker
-app (its `downloads_auto_start` setting is currently `0`). DHT then embeds the bytes as it
+app (its `downloads_auto_start` setting, which is off by default). DHT then embeds the bytes as it
 scrapes, while the links still work. That is a setting in DHT, not something this code can fix.
 
 ## Identity mapping
 
-Discord has stable numeric user ids; Meta exports have only display names. The *People* page ties
-them together: tick the identities that belong to one person, give them a name, and that name is
+Discord has stable numeric user ids and Teams has Skype account ids; Meta exports have only display
+names. The *People* page ties them together: tick the identities that belong to one person, give them a name, and that name is
 what the whole app shows — thread lists, participants, message senders, search hits and reaction
 tooltips — in place of the per-platform names.
 
@@ -320,7 +436,9 @@ name.
 
 Caveat worth knowing: Meta gives no stable user ids, so two different people sharing a display
 name would merge. That is easy to eyeball on the *People* page, which lists every identity with
-its message count.
+its message count. It does not apply to Discord or Teams, whose identities are keyed by account —
+there, two people called the same thing stay two rows, and the *People* page is where you say they
+are one person if they are.
 
 ## Schema
 
@@ -374,10 +492,16 @@ different database" is a thing that happens.
 ### The checks build their own archive
 
 `py smoke_test.py` does not read your archive. `fixture.py` writes a Facebook export, an Instagram
-export, a Messenger encrypted-chat download and a `.dht` file into a temp folder — with real
-mojibake, Czech inflection, Instagram's reaction pseudo-messages and a media URI Meta failed to
-export — ingests all four, links the identities into people, and hands back an `Archive`. Every
-check runs against that, so they pass on a fresh clone and leave nothing behind.
+export, a Messenger encrypted-chat download, a Microsoft Teams export — as a folder *and* as the tar
+Microsoft ships — and a `.dht` file into a temp folder, then ingests them, links the identities into
+people, and hands back an `Archive`. Every check runs against that, so they pass on a fresh clone and
+leave nothing behind.
+
+What the fixture deliberately contains is the list of things that have gone wrong or could: real
+mojibake, Czech inflection, Instagram's reaction pseudo-messages, a media URI Meta failed to export,
+Skype emoticons and quoted replies, a base64'd GIF card, an object Teams left out of the download, a
+message Teams attributes to nobody at all, and the same export offered twice in two forms — which
+must produce the same primary keys or the check fails.
 
 The Czech dictionary is the one optional part: it is derived data, so checks that need it are
 skipped with a note rather than failed, exactly as search itself degrades without it.

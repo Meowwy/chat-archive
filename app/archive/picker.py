@@ -31,7 +31,12 @@ sys.stdout.buffer.write((path or "").encode("utf-8"))
 """
 
 _DB_TYPES = '[("Archive database", "*.sqlite *.db *.sqlite3"), ("All files", "*.*")]'
-_DHT_TYPES = '[("Discord History Tracker", "*.dht"), ("All files", "*.*")]'
+# Two exports arrive as a single file rather than a folder: Discord History
+# Tracker's own database, and the tar a Microsoft Teams export downloads as.
+_EXPORT_TYPES = (
+    '[("Export file", "*.dht *.tar"), ("Discord History Tracker", "*.dht"), '
+    '("Microsoft Teams export", "*.tar"), ("All files", "*.*")]'
+)
 
 
 def _ask(call: str, timeout: int) -> str | None:
@@ -54,10 +59,15 @@ def ask_directory(timeout: int = 300) -> str | None:
     return _ask('askdirectory(title="Select the exported chat folder")', timeout)
 
 
-def ask_dht(timeout: int = 300) -> str | None:
-    """Open a file chooser for a Discord History Tracker file."""
+def ask_export_file(timeout: int = 300) -> str | None:
+    """Open a file chooser for an export that comes as one file.
+
+    A Discord History Tracker `.dht`, or the `.tar` a Microsoft Teams export
+    downloads as - which is read where it lies rather than unpacked, so there is
+    nothing to pick but the file itself.
+    """
     return _ask(
-        f'askopenfilename(title="Select a Discord History Tracker file", filetypes={_DHT_TYPES})',
+        f'askopenfilename(title="Select an export file", filetypes={_EXPORT_TYPES})',
         timeout,
     )
 

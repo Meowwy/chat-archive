@@ -76,9 +76,9 @@ def media_type(name: str) -> str | None:
 def message_source_key(platform: str, thread_path: str, message: dict) -> str:
     """Stable dedup key for a Meta message, which carries no id of its own.
 
-    Verified unique across all 6,792 messages in the current exports. Built from
-    the raw (still-mojibake) message so it stays stable regardless of future
-    changes to the repair logic.
+    Verified unique across every message in the exports it was built against.
+    Built from the raw (still-mojibake) message so it stays stable regardless of
+    future changes to the repair logic.
     """
     uris = [a.get("uri") for k in _MEDIA_KEYS for a in message.get(k, [])]
     sticker = message.get("sticker") or {}

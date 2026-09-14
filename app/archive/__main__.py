@@ -4,7 +4,7 @@
     py -m archive setup                 migrate + fold local Discord media in
     py -m archive migrate               apply schema changes only
     py -m archive clean                 drop Instagram's reaction pseudo-messages
-    py -m archive ingest <path>         import a Meta export folder or a .dht file
+    py -m archive ingest <path>         import an export folder, a .dht or a Teams .tar
                                         (Messenger encrypted chats: pick their `messages` folder)
     py -m archive discord-media         recover DHT-embedded blobs and downloads
     py -m archive people                list every identity and who it belongs to
@@ -235,9 +235,13 @@ def main(argv: list[str] | None = None) -> int:
     p_czech.set_defaults(func=cmd_czech_dict)
 
     p_ingest = sub.add_parser(
-        "ingest", help="import a Facebook/Instagram export folder or a Discord .dht file"
+        "ingest",
+        help="import a Facebook/Instagram/Teams export folder, a Discord .dht "
+             "file, or the .tar a Teams export arrives as",
     )
-    p_ingest.add_argument("path", help="an export folder, or the tracker's .dht file")
+    p_ingest.add_argument(
+        "path", help="an export folder, the tracker's .dht file, or a Teams .tar"
+    )
     p_ingest.add_argument("-q", "--quiet", dest="verbose", action="store_false", default=True)
     p_ingest.set_defaults(func=cmd_ingest)
 

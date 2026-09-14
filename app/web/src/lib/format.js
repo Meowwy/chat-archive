@@ -67,7 +67,8 @@ export function relativeDay(ms) {
 export const PLATFORMS = {
 	discord: { label: 'Discord', color: '#5865f2' },
 	facebook: { label: 'Facebook', color: '#0866ff' },
-	instagram: { label: 'Instagram', color: '#e1306c' }
+	instagram: { label: 'Instagram', color: '#e1306c' },
+	teams: { label: 'Teams', color: '#6264a7' }
 };
 
 export const platformLabel = (key) => PLATFORMS[key]?.label ?? key;

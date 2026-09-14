@@ -11,7 +11,7 @@
 	let offset = $state(0);
 
 	const LIMIT = 60;
-	const filters = ['all', 'discord', 'facebook', 'instagram'];
+	const filters = ['all', 'discord', 'facebook', 'instagram', 'teams'];
 
 	// Which words the server widened to a whole Czech paradigm, named by their
 	// lemma - "hospody" was searched as every form of "hospoda".
